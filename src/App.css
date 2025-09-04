@@ -1,0 +1,26 @@
+html, body, #root {
+    height: 100%;
+    margin: 0;
+    background: #ffffff;
+    font-family: "Courier New", Courier, monospace;
+    color: #000000;
+}
+
+.toolbar {
+    position: fixed;
+    top: 8px;
+    left: 8px;
+    background: #f2f2f2;
+    border: 1px solid #d0d0d0;
+    padding: 6px 10px;
+    border-radius: 8px;
+    font-family: ui-monospace, monospace;
+    z-index: 1;
+}
+
+canvas {
+    display: block;
+    width: 100vw;
+    height: 100vh;
+}
+/* <-- give the canvas size */
