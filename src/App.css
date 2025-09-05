@@ -4,6 +4,7 @@ html, body, #root {
     background: #ffffff;
     font-family: "Courier New", Courier, monospace;
     color: #000000;
+    overscroll-behavior: none;
 }
 
 .toolbar {
@@ -20,5 +21,7 @@ canvas {
     display: block;
     width: 100vw;
     height: 100vh;
+    touch-action: none; /* let your handlers own the pan/zoom */
+    -ms-touch-action: none; /* old Edge */
 }
 /* <-- give the canvas size */

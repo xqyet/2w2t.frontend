@@ -39,8 +39,10 @@ const PLAZA_LINES: Array<{ text: string; link?: string; gap?: number }> = [
     { text: '2W2T', },
     { text: '~2writers2tiles~', gap: 12 },// extra margin below the title (pixels)
     { text: 'An Infinite Void to\nwrite, create, and destroy', gap: 8 }, // newline after "Void to"
-    { text: 'Discord', link: 'https://discord.gg/KPDftfjwfS' },
-    { text: 'XQYET', link: 'https://xqyet.dev/' },
+    { text: 'Chat with other users you find\nin the void!', gap:8 },
+    { text: 'How to Paste ASCII Art', link: 'https://github.com/xqyet/2w2t.ASCII', gap:10 },
+    { text: '~xqyet~', link: 'https://xqyet.dev/' },
+
 ];
 
 // helper
@@ -240,7 +242,7 @@ function App() {
 
             const lineAdvance = FONT_PX + PAD_Y * 2;
             const totalHeight = PLAZA_LINES.length * lineAdvance;
-            let yStart = plazaTop + (plazaHpx - totalHeight) / 2;
+            let yStart = plazaTop + (plazaHpx - totalHeight) / 2-30;
 
             for (const line of PLAZA_LINES) {
                 const parts = line.text.split('\n');
@@ -672,6 +674,53 @@ function App() {
         await refreshViewport();
     }
 
+    // --- touch helpers (map to your existing mouse logic) ---
+    function firstTouch(e: TouchEvent) {
+        return e.changedTouches[0];
+    }
+
+    function onTouchStart(e: React.TouchEvent<HTMLCanvasElement>) {
+        // allow panning instead of page scroll
+        e.preventDefault();
+
+        const t = firstTouch(e.nativeEvent);
+        dragging.current = {
+            startMouseX: t.clientX,
+            startMouseY: t.clientY,
+            startCamX: cam.current.x,
+            startCamY: cam.current.y,
+        };
+        isInertial.current = false;
+        samples.current = [{ x: t.clientX, y: t.clientY, t: performance.now() }];
+    }
+
+    function onTouchMove(e: React.TouchEvent<HTMLCanvasElement>) {
+        e.preventDefault();
+        if (!dragging.current) return;
+
+        const t = firstTouch(e.nativeEvent);
+
+        const rawDx = (t.clientX - dragging.current.startMouseX) / VIEW_SCALE;
+        const rawDy = (t.clientY - dragging.current.startMouseY) / VIEW_SCALE;
+
+        const dx = rawDx * DRAG_SENS;
+        const dy = rawDy * DRAG_SENS;
+
+        cam.current.x = dragging.current.startCamX - dx;
+        cam.current.y = dragging.current.startCamY - dy;
+
+        const now = performance.now();
+        samples.current.push({ x: t.clientX, y: t.clientY, t: now });
+        while (samples.current.length > 2 && now - samples.current[0].t > SAMPLE_MS) {
+            samples.current.shift();
+        }
+    }
+
+    function onTouchEnd(e: React.TouchEvent<HTMLCanvasElement>) {
+        e.preventDefault();
+        // reuse your mouse-up logic (fling + refresh)
+        onMouseUp();
+    }
 
 
     function startInertia() {
@@ -886,6 +935,10 @@ function App() {
                 onMouseUp={onMouseUp}
                 onMouseLeave={onMouseUp}
                 onClick={onClick}
+
+                onTouchStart={onTouchStart}
+                onTouchMove={onTouchMove}
+                onTouchEnd={onTouchEnd}
             />
         </>
     );
