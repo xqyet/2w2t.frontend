@@ -10,12 +10,10 @@ html, body, #root {
     position: fixed;
     top: 8px;
     left: 8px;
-    background: #f2f2f2;
-    border: 1px solid #d0d0d0;
-    padding: 6px 10px;
-    border-radius: 8px;
-    font-family: ui-monospace, monospace;
     z-index: 1;
+    background: none;
+    border: none;
+    padding: 0;
 }
 
 canvas {

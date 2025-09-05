@@ -16,14 +16,31 @@ const FONT_FAMILY = '"Courier New", Courier, monospace';
 const VIEW_SCALE = 1.25;
 const mod = (n: number, m: number) => ((n % m) + m) % m;
 const FADE_MS = 140; // fast fade-in, ~YWO(T) feel
+const SAMPLE_MS = 180;     // was ~120; longer window = smaller fling velocity
+const FLING_SCALE = 0.6;   // 0..1; scales down the initial fling
+const DECAY_PER_MS = 0.007; // was 0.0045; higher = stops faster
+const MIN_SPEED = 0.00006;  // was 0.00005; higher = stops earlier
+const QUIET_WINDOW_MS = 25; // if the last ~100ms were nearly still, don't fling
+const QUIET_DIST_PX = 6;   // movement less than this in that window counts as still
+const COORD_UNIT = 10; // show 1 per 10 characters (10->1, 20->2, etc.)
+const DRAG_SENS = 0.9; // 1.0 = current feel, lower = less sensitive (e.g., 0.6–0.85)
+
+
+// --- visual toggles ---
+const SHOW_GRID = false;              // turn cell grid on/off
+const SHOW_TILE_BORDERS = false;      // turn per-tile border boxes on/off
+const SHOW_MISSING_PLACEHOLDER = false; // show "…" for unloaded tiles
 
 // --- protected plaza around (0,0) in character coordinates ---
 const PROTECT = { x: -10, y: -10, w: 30, h: 13 };
 
 // text/links to show inside the plaza (centered)
-const PLAZA_LINES: Array<{ text: string; link?: string }> = [
-    { text: 'Welcome to the plaza' },
-    { text: 'docs: example.com', link: 'https://example.com' }, // example link
+const PLAZA_LINES: Array<{ text: string; link?: string; gap?: number }> = [
+    { text: '2W2T', },
+    { text: '~2writers2tiles~', gap: 12 },// extra margin below the title (pixels)
+    { text: 'An Infinite Void to\nwrite, create, and destroy', gap: 8 }, // newline after "Void to"
+    { text: 'Discord', link: 'https://discord.gg/KPDftfjwfS' },
+    { text: 'XQYET', link: 'https://xqyet.dev/' },
 ];
 
 // helper
@@ -38,10 +55,23 @@ function App() {
     const dragging = useRef<null | { startMouseX: number; startMouseY: number; startCamX: number; startCamY: number }>(null);
     // caret in absolute character coordinates (worldwide), + anchor column for Enter
     const caret = useRef<{ cx: number; cy: number; anchorCx: number } | null>(null);
+    const velocity = useRef<{ vx: number; vy: number }>({ vx: 0, vy: 0 });
+    const isInertial = useRef(false);
+    const samples = useRef<Array<{ x: number; y: number; t: number }>>([]);
+
+
 
     const linkAreas = useRef<{ x: number; y: number; w: number; h: number; url: string }[]>([]);
     // recent writes: key = "cx,cy" (absolute char coords), value = timestamp (ms)
     const recentWrites = useRef<Map<string, number>>(new Map());
+
+    // Serial queue to guarantee ordering of caret moves + patches
+    const inputQueue = useRef<Promise<void>>(Promise.resolve());
+
+    function enqueueEdit(fn: () => Promise<void> | void) {
+        inputQueue.current = inputQueue.current.then(async () => { await fn(); });
+        return inputQueue.current.catch(() => { }); // swallow to keep chain alive
+    }
 
     // Queue of in-flight network patches per tile key
     const pending = useRef<Map<TileKey, Promise<void>>>(new Map());
@@ -68,6 +98,56 @@ function App() {
 
         pending.current.set(k, run);
     }
+
+
+
+    function ensureCaretEdgeFollow(): boolean {
+        if (!caret.current) return false;
+        const cv = canvasRef.current!;
+        const ctx = cv.getContext('2d')!;
+        const { cellX, cellY } = metrics(ctx);
+
+        // viewport size in WORLD units
+        const worldW = (cv.clientWidth || window.innerWidth) / VIEW_SCALE;
+        const worldH = (cv.clientHeight || window.innerHeight) / VIEW_SCALE;
+
+        // caret cell in WORLD pixels
+        const cX = caret.current.cx * cellX;
+        const cY = caret.current.cy * cellY;
+
+        // current view rect in WORLD pixels
+        const left = cam.current.x;
+        const top = cam.current.y;
+        const right = cam.current.x + worldW;
+        const bottom = cam.current.y + worldH;
+
+        let moved = false;
+
+        // --- horizontal: keep the whole caret cell visible and glued to edges ---
+        // left edge: if caret's left goes off-screen, align left edge to caret left
+        if (cX < left) {
+            cam.current.x = cX;
+            moved = true;
+        }
+        // right edge: if caret's right goes off-screen, align right edge to caret right
+        if (cX + cellX > right) {
+            cam.current.x = cX + cellX - worldW;
+            moved = true;
+        }
+
+        // --- vertical: same idea for rows ---
+        if (cY < top) {
+            cam.current.y = cY;
+            moved = true;
+        }
+        if (cY + cellY > bottom) {
+            cam.current.y = cY + cellY - worldH;
+            moved = true;
+        }
+
+        return moved;
+    }
+
 
     function markRecent(cx: number, cy: number) {
         recentWrites.current.set(`${cx},${cy}`, performance.now());
@@ -96,7 +176,7 @@ function App() {
 
     // compute cell size from font metrics + padding (+ zoom)
     function metrics(ctx: CanvasRenderingContext2D) {
-        ctx.font = `${FONT_PX}px ${FONT_FAMILY}`; 
+        ctx.font = `${FONT_PX}px ${FONT_FAMILY}`;
         const charW = ctx.measureText('M').width; // monospace -> constant
         const cellX = Math.round((charW + PAD_X * 2) * DEFAULT_ZOOM_X);
         const cellY = Math.round((FONT_PX + PAD_Y * 2) * DEFAULT_ZOOM_Y);
@@ -132,7 +212,7 @@ function App() {
             // compute cell sizes in WORLD units (unscaled)
             const { cellX, cellY } = metrics(ctx);
 
-            
+
 
 
             // now draw everything in *world* coordinates, scaled up
@@ -163,42 +243,49 @@ function App() {
             let yStart = plazaTop + (plazaHpx - totalHeight) / 2;
 
             for (const line of PLAZA_LINES) {
-                const metrics = ctx.measureText(line.text);
-                const lineW = Math.ceil(metrics.width);
-                const x = plazaLeft + (plazaWpx - lineW) / 2;
-                const y = yStart;
+                const parts = line.text.split('\n');
 
-                // link styling (optional underline)
-                if (line.link) {
-                    // text
-                    ctx.fillStyle = '#0044aa';
-                    ctx.fillText(line.text, x, y);
-                    // underline
-                    ctx.beginPath();
-                    ctx.moveTo(x, y + FONT_PX + 1);
-                    ctx.lineTo(x + lineW, y + FONT_PX + 1);
-                    ctx.strokeStyle = '#0044aa';
-                    ctx.stroke();
+                for (const part of parts) {
+                    const m = ctx.measureText(part);
+                    const lineW = Math.ceil(m.width);
+                    const x = plazaLeft + (plazaWpx - lineW) / 2;
+                    const y = yStart;
 
-                    // record clickable area in WORLD coords
-                    linkAreas.current.push({ x, y, w: lineW, h: lineAdvance, url: line.link });
-                } else {
-                    ctx.fillStyle = '#333';
-                    ctx.fillText(line.text, x, y);
+                    if (line.link) {
+                        // link style + underline
+                        ctx.fillStyle = '#0044aa';
+                        ctx.fillText(part, x, y);
+                        ctx.beginPath();
+                        ctx.moveTo(x, y + FONT_PX + 1);
+                        ctx.lineTo(x + lineW, y + FONT_PX + 1);
+                        ctx.strokeStyle = '#0044aa';
+                        ctx.stroke();
+
+                        // record clickable area in *world* coords for onClick()
+                        linkAreas.current.push({ x, y, w: lineW, h: lineAdvance, url: line.link });
+                    } else {
+                        ctx.fillStyle = '#333';
+                        ctx.fillText(part, x, y);
+                    }
+
+                    yStart += lineAdvance; // advance for each visual line
                 }
 
-                yStart += lineAdvance;
+                // extra margin after the (possibly multi-line) item
+                yStart += (line.gap ?? 0);
             }
 
             // per-cell grid (aligned to camera) — use worldW/H
-            ctx.strokeStyle = '#e3e3e3';
-            const ox = mod(cam.current.x, cellX);
-            const oy = mod(cam.current.y, cellY);
-            for (let x = -ox; x <= worldW; x += cellX) {
-                ctx.beginPath(); ctx.moveTo(x + 0.5, 0); ctx.lineTo(x + 0.5, worldH); ctx.stroke();
-            }
-            for (let y = -oy; y <= worldH; y += cellY) {
-                ctx.beginPath(); ctx.moveTo(0, y + 0.5); ctx.lineTo(worldW, y + 0.5); ctx.stroke();
+            if (SHOW_GRID) {
+                ctx.strokeStyle = '#e3e3e3';
+                const ox = mod(cam.current.x, cellX);
+                const oy = mod(cam.current.y, cellY);
+                for (let x = -ox; x <= worldW; x += cellX) {
+                    ctx.beginPath(); ctx.moveTo(x + 0.5, 0); ctx.lineTo(x + 0.5, worldH); ctx.stroke();
+                }
+                for (let y = -oy; y <= worldH; y += cellY) {
+                    ctx.beginPath(); ctx.moveTo(0, y + 0.5); ctx.lineTo(worldW, y + 0.5); ctx.stroke();
+                }
             }
 
             // viewport -> tile range (use worldW/H)
@@ -219,7 +306,10 @@ function App() {
                     const screenY = ty * tilePxH - cam.current.y;
 
                     ctx.strokeStyle = '#cfcfcf';
-                    ctx.strokeRect(screenX + 0.5, screenY + 0.5, tilePxW - 1, tilePxH - 1);
+                    if (SHOW_TILE_BORDERS) {
+                        ctx.strokeStyle = '#cfcfcf';
+                        ctx.strokeRect(screenX + 0.5, screenY + 0.5, tilePxW - 1, tilePxH - 1);
+                    }
 
                     if (tile) {
                         // Figure out if the caret is inside THIS tile, and which cell it’s on
@@ -281,10 +371,12 @@ function App() {
                                 ctx.fillText(ch, cellLeft + PAD_X, cellTop + PAD_Y);
                                 ctx.restore();
 
+
+
                             }
                         }
-            
-                    } else {
+
+                    } else if (SHOW_MISSING_PLACEHOLDER) {
                         ctx.fillStyle = '#888';
                         ctx.fillText('…', screenX + tilePxW / 2 - 4, screenY + tilePxH / 2 - 8);
                     }
@@ -292,6 +384,77 @@ function App() {
             }
 
             ctx.restore(); // end scaled drawing
+
+            // --- HUD: center coordinates in bottom-right (device pixels) ---
+            {
+                // center of the screen in WORLD pixels
+                const centerWorldX = cam.current.x + worldW / 2;
+                const centerWorldY = cam.current.y + worldH / 2;
+
+                // convert to absolute **character** coords (can be fractional)
+                const cxCenterExact = centerWorldX / cellX;
+                const cyCenterExact = centerWorldY / cellY;
+
+                // display in “coarse units”: 1 per COORD_UNIT characters
+                const dispX = Math.trunc(cxCenterExact / COORD_UNIT);
+                const dispY = Math.trunc(cyCenterExact / COORD_UNIT);
+
+                const hudText = `X:${dispX} Y:${dispY}`;
+
+                ctx.save();
+                ctx.font = '18px "Courier New", Courier, monospace';
+                ctx.textAlign = 'left';
+                ctx.textBaseline = 'middle';
+
+                // measure text
+                const m = ctx.measureText(hudText);
+                const textW = Math.ceil(m.width);
+                const textH =
+                    (m.actualBoundingBoxAscent ?? 14) + (m.actualBoundingBoxDescent ?? 4);
+
+                // padding & box
+                const padX = 12;
+                const padY = 8;
+                const boxW = textW + padX * 2;
+                const boxH = textH + padY * 2;
+
+                // "glued" to bottom-right: no margin
+                const bx = cv.width - boxW;
+                const by = cv.height - boxH;
+
+                // rounded-rect helper
+                const r = 10;
+                function roundRect(x: number, y: number, w: number, h: number, rad: number) {
+                    const rr = Math.min(rad, w / 2, h / 2);
+                    ctx.beginPath();
+                    ctx.moveTo(x + rr, y);
+                    ctx.lineTo(x + w - rr, y);
+                    ctx.quadraticCurveTo(x + w, y, x + w, y + rr);
+                    ctx.lineTo(x + w, y + h - rr);
+                    ctx.quadraticCurveTo(x + w, y + h, x + w - rr, y + h);
+                    ctx.lineTo(x + rr, y + h);
+                    ctx.quadraticCurveTo(x, y + h, x, y + h - rr);
+                    ctx.lineTo(x, y + rr);
+                    ctx.quadraticCurveTo(x, y, x + rr, y);
+                    ctx.closePath();
+                }
+
+                // background & border
+                roundRect(bx, by, boxW, boxH, r);
+                ctx.fillStyle = 'rgba(0, 0, 0, 0.08)';   // translucent gray
+                ctx.fill();
+                ctx.strokeStyle = 'rgba(0, 0, 0, 0.18)'; // subtle border
+                ctx.stroke();
+
+                // text centered vertically inside the pill
+                ctx.fillStyle = '#000';
+                ctx.fillText(hudText, bx + padX, by + boxH / 2);
+
+                ctx.restore();
+            }
+
+
+
 
             af = requestAnimationFrame(draw);
         }
@@ -342,6 +505,8 @@ function App() {
         setVersionTick(v => v + 1);
     }
 
+    if (ensureCaretEdgeFollow()) { refreshViewport(); }
+
     // boot: hub + initial viewport
     useEffect(() => {
         const hub = getHub();
@@ -389,6 +554,8 @@ function App() {
             // advance caret
             caret.current.cx += 1;
 
+            if (ensureCaretEdgeFollow()) { refreshViewport(); }
+
             // Optional: prevent the browser from trying to paste into the page
             e.preventDefault();
         }
@@ -416,18 +583,130 @@ function App() {
 
     // mouse pan (reversed like YWOT)
     function onMouseDown(e: React.MouseEvent<HTMLCanvasElement>) {
-        dragging.current = { startMouseX: e.clientX, startMouseY: e.clientY, startCamX: cam.current.x, startCamY: cam.current.y };
+        dragging.current = {
+            startMouseX: e.clientX,
+            startMouseY: e.clientY,
+            startCamX: cam.current.x,
+            startCamY: cam.current.y,
+        };
+        isInertial.current = false; // stop any running inertia
+        samples.current = [{ x: e.clientX, y: e.clientY, t: performance.now() }];
     }
     function onMouseMove(e: React.MouseEvent<HTMLCanvasElement>) {
+        const cv = e.currentTarget;
+
+        // --- hover cursor over links (works even when not dragging) ---
+        const rect = cv.getBoundingClientRect();
+        const screenWorldX = (e.clientX - rect.left) / VIEW_SCALE;
+        const screenWorldY = (e.clientY - rect.top) / VIEW_SCALE;
+
+        const overLink = linkAreas.current.some(a =>
+            screenWorldX >= a.x && screenWorldX <= a.x + a.w &&
+            screenWorldY >= a.y && screenWorldY <= a.y + a.h
+        );
+
+        // if dragging, show grabbing; else show pointer over links or default
+        cv.style.cursor = dragging.current
+            ? 'grabbing'
+            : (overLink ? 'pointer' : 'default');
+
+        // --- your existing dragging code (only runs when dragging) ---
         if (!dragging.current) return;
-        const dx = (e.clientX - dragging.current.startMouseX) / VIEW_SCALE;
-        const dy = (e.clientY - dragging.current.startMouseY) / VIEW_SCALE;
+
+        const rawDx = (e.clientX - dragging.current.startMouseX) / VIEW_SCALE;
+        const rawDy = (e.clientY - dragging.current.startMouseY) / VIEW_SCALE;
+
+        const dx = rawDx * DRAG_SENS;
+        const dy = rawDy * DRAG_SENS;
+
         cam.current.x = dragging.current.startCamX - dx;
         cam.current.y = dragging.current.startCamY - dy;
+
+        const now = performance.now();
+        samples.current.push({ x: e.clientX, y: e.clientY, t: now });
+        while (samples.current.length > 2 && now - samples.current[0].t > SAMPLE_MS) {
+            samples.current.shift();
+        }
     }
+
     async function onMouseUp() {
-        if (dragging.current) { dragging.current = null; await refreshViewport(); }
+        if (!dragging.current) return;
+        dragging.current = null;
+
+        // grab & clear the buffer
+        const buf = samples.current;
+        samples.current = [];
+
+        if (buf.length >= 2) {
+            // 1) recent-quiet check: look at just the last ~QUIET_WINDOW_MS of movement
+            const end = buf[buf.length - 1];
+            let i = buf.length - 1;
+            while (i > 0 && (end.t - buf[i - 1].t) <= QUIET_WINDOW_MS) i--;
+            const start = buf[i];
+
+            const recentDx = end.x - start.x;
+            const recentDy = end.y - start.y;
+            const recentDist = Math.hypot(recentDx, recentDy);
+
+            if (recentDist < QUIET_DIST_PX) {
+                // user stopped moving before releasing ? no fling
+                await refreshViewport();
+                return;
+            }
+
+            // 2) otherwise compute fling velocity as before (using your window + scaling)
+            const dt = Math.max(16, end.t - buf[0].t); // ms (avoid tiny dt)
+            const vx = (((end.x - buf[0].x) / dt) / VIEW_SCALE) * FLING_SCALE;
+            const vy = (((end.y - buf[0].y) / dt) / VIEW_SCALE) * FLING_SCALE;
+
+            const speed2 = vx * vx + vy * vy;
+            if (speed2 > 0.000001) {
+                velocity.current.vx = vx;
+                velocity.current.vy = vy;
+                startInertia();
+                return;
+            }
+        }
+
+        // no fling
+        await refreshViewport();
     }
+
+
+
+    function startInertia() {
+        isInertial.current = true;
+        let last = performance.now();
+
+        function step() {
+            if (!isInertial.current) return;
+            const now = performance.now();
+            let dt = Math.min(now - last, 40); // clamp spikes
+            last = now;
+
+            // advance camera
+            cam.current.x -= velocity.current.vx * dt;
+            cam.current.y -= velocity.current.vy * dt;
+
+            // exponential decay
+            const decay = Math.exp(-DECAY_PER_MS * dt);
+            velocity.current.vx *= decay;
+            velocity.current.vy *= decay;
+
+            // stop when slow enough
+            const speed2 = velocity.current.vx * velocity.current.vx + velocity.current.vy * velocity.current.vy;
+            if (speed2 < MIN_SPEED * MIN_SPEED) {
+                isInertial.current = false;
+                refreshViewport();
+                return;
+            }
+            requestAnimationFrame(step);
+        }
+        requestAnimationFrame(step);
+    }
+
+
+
 
     // click sets caret
     function onClick(e: React.MouseEvent<HTMLCanvasElement>) {
@@ -436,8 +715,24 @@ function App() {
         const { cellX, cellY } = metrics(ctx);
 
         const rect = cv.getBoundingClientRect();
-        const worldX = (e.clientX - rect.left) / VIEW_SCALE + cam.current.x;
-        const worldY = (e.clientY - rect.top) / VIEW_SCALE + cam.current.y;
+        // screen/world coords = pixels in the scaled world space (no camera added)
+        const screenWorldX = (e.clientX - rect.left) / VIEW_SCALE;
+        const screenWorldY = (e.clientY - rect.top) / VIEW_SCALE;
+
+        // full world coords (what you already had) for caret math
+        const worldX = screenWorldX + cam.current.x;
+        const worldY = screenWorldY + cam.current.y;
+
+        // 1) link hit-test in the SAME space they were recorded (screen/world)
+        for (const a of linkAreas.current) {
+            if (
+                screenWorldX >= a.x && screenWorldX <= a.x + a.w &&
+                screenWorldY >= a.y && screenWorldY <= a.y + a.h
+            ) {
+                window.open(a.url, '_blank', 'noopener,noreferrer');
+                return; // don't set caret if we clicked a link
+            }
+        }
 
         const tilePxW = TILE_W * cellX, tilePxH = TILE_H * cellY;
         const tx = Math.floor(worldX / tilePxW);
@@ -474,49 +769,101 @@ function App() {
 
     // keyboard typing
     useEffect(() => {
-        async function onKey(e: KeyboardEvent) {
+        function onKey(e: KeyboardEvent) {
             if (!caret.current) return;
 
-            // Enter: move to next line keeping the original column you clicked
+            // Ignore modifier combos and non-text keys we handle separately
+            if (e.ctrlKey || e.metaKey || e.altKey) return;
+            if (
+                e.key === 'Shift' ||
+                e.key === 'CapsLock' ||
+                e.key === 'NumLock' ||
+                e.key === 'ScrollLock' ||
+                e.key === 'Dead' ||      // IME / accent start
+                e.key === 'Escape' ||
+                e.key === 'Tab'
+            ) {
+                return;
+            }
+
+            // Enter: next line, keep anchor column
             if (e.key === 'Enter') {
                 caret.current.cy += 1;
                 caret.current.cx = caret.current.anchorCx;
                 setVersionTick(v => v + 1);
+                if (ensureCaretEdgeFollow()) { refreshViewport(); }
                 return;
             }
 
-            // Arrow keys move the absolute caret across tiles
-            if (e.key === 'ArrowLeft') { caret.current.cx -= 1; setVersionTick(v => v + 1); return; }
-            if (e.key === 'ArrowRight') { caret.current.cx += 1; setVersionTick(v => v + 1); return; }
-            if (e.key === 'ArrowUp') { caret.current.cy -= 1; setVersionTick(v => v + 1); return; }
-            if (e.key === 'ArrowDown') { caret.current.cy += 1; setVersionTick(v => v + 1); return; }
-
-            // Only handle single printable characters here
-            if (e.key.length !== 1) return;
-
-            // If caret is inside protected area, do nothing
-            if (caret.current && inProtected(caret.current.cx, caret.current.cy)) {
+            // Arrow keys move caret only
+            if (e.key === 'ArrowLeft') {
+                caret.current.cx -= 1; setVersionTick(v => v + 1); if (ensureCaretEdgeFollow()) { refreshViewport(); }
+                return;
+            }
+            if (e.key === 'ArrowRight') {
+                caret.current.cx += 1; setVersionTick(v => v + 1); if (ensureCaretEdgeFollow()) { refreshViewport(); }
+                return;
+            }
+            if (e.key === 'ArrowUp') {
+                caret.current.cy -= 1; setVersionTick(v => v + 1); if (ensureCaretEdgeFollow()) { refreshViewport(); }
+                return;
+            }
+            if (e.key === 'ArrowDown') {
+                caret.current.cy += 1; setVersionTick(v => v + 1); if (ensureCaretEdgeFollow()) { refreshViewport(); }
                 return;
             }
 
-            // figure out which tile and offset we're writing into
-            const { tx, ty, offset } = tileForChar(caret.current.cx, caret.current.cy);
-            const t = ensureTile(tx, ty);
+            // Backspace: clear previous cell (queued to preserve order)
+            if (e.key === 'Backspace') {
+                e.preventDefault();
+                enqueueEdit(() => {
+                    if (!caret.current) return;
+                    const snapCx = caret.current.cx - 1;
+                    const snapCy = caret.current.cy;
+                    if (inProtected(snapCx, snapCy)) return;
 
-            // optimistic local write
-            t.data = t.data.slice(0, offset) + e.key + t.data.slice(offset + 1);
-            setVersionTick(v => v + 1);
+                    caret.current.cx = snapCx;
+                    const { tx, ty, offset } = tileForChar(snapCx, snapCy);
+                    const t = ensureTile(tx, ty);
 
-            // ? mark this cell for fade-in (use the current caret position)
-            markRecent(caret.current.cx, caret.current.cy);
+                    t.data = t.data.slice(0, offset) + ' ' + t.data.slice(offset + 1);
+                    setVersionTick(v => v + 1);
 
-            // send to server, enqueue network patch (do not await)
-            queuePatch(t, offset, e.key);
+                    if (ensureCaretEdgeFollow()) { refreshViewport(); }
 
+                    markRecent(snapCx, snapCy);
+                    queuePatch(t, offset, ' ');
+                });
+                return;
+            }
 
-            // advance caret to the right — infinite across tiles
-            caret.current.cx += 1;
-            setVersionTick(v => v + 1);
+            // Only write single printable characters here
+            if (e.key.length === 1) {
+                enqueueEdit(() => {
+                    if (!caret.current) return;
+                    const snapCx = caret.current.cx;
+                    const snapCy = caret.current.cy;
+                    if (inProtected(snapCx, snapCy)) return;
+
+                    const { tx, ty, offset } = tileForChar(snapCx, snapCy);
+                    const t = ensureTile(tx, ty);
+
+                    t.data = t.data.slice(0, offset) + e.key + t.data.slice(offset + 1);
+                    setVersionTick(v => v + 1);
+
+                    markRecent(snapCx, snapCy);
+                    queuePatch(t, offset, e.key);
+
+                    // advance caret after enqueue
+                    if (caret.current) {
+                        caret.current.cx = snapCx + 1;
+                        setVersionTick(v => v + 1);
+                    }
+                });
+                return;
+            }
+
+            // anything else: ignore
         }
 
         window.addEventListener('keydown', onKey);
@@ -524,9 +871,14 @@ function App() {
     }, []);
 
 
+
     return (
         <>
-            <div className="toolbar">drag to pan • click to set caret • type to edit</div>
+            <div className="toolbar">
+                {" "} 
+                <img src="https://cdn.discordapp.com/emojis/889434608037421066.png?v=1" alt="stars5" height="24" />
+            </div>
+
             <canvas
                 ref={canvasRef}
                 onMouseDown={onMouseDown}
