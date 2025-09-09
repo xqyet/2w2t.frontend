@@ -1,6 +1,6 @@
-# 2w2t — Frontend
+# 2w2t 
 
-A fast, minimalist clone of **Your World of Text (YWOT)** with a focus on instant chunk (canvas) rendering, smooth panning, and responsive real-time edits.
+A fast, minimalist clone of **Your World of Text (YWOT)** with a focus on instant chunk (canvas) rendering, smooth panning, and responsive real-time edits (a work in progress)
 
 > **Note:** This repo contains **only the frontend**. To run it locally or deploy it, you’ll also need a compatible backend API + realtime hub (details below).
 
