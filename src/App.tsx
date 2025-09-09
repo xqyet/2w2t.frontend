@@ -13,7 +13,7 @@ const PAD_Y = 3;           // top/bottom padding inside a cell
 const DEFAULT_ZOOM_X = 0.95; // < 1.0 = slightly tighter horizontally
 const DEFAULT_ZOOM_Y = 0.94; // keep your slightly zoomed-in rows
 const FONT_FAMILY = '"Courier New", Courier, monospace';
-const VIEW_SCALE = 1.25;
+const VIEW_SCALE = 1.15;
 const mod = (n: number, m: number) => ((n % m) + m) % m;
 const FADE_MS = 140; // fast fade-in, ~YWO(T) feel
 const SAMPLE_MS = 180;     // was ~120; longer window = smaller fling velocity
@@ -24,6 +24,7 @@ const QUIET_WINDOW_MS = 25; // if the last ~100ms were nearly still, don't fling
 const QUIET_DIST_PX = 6;   // movement less than this in that window counts as still
 const COORD_UNIT = 10; // show 1 per 10 characters (10->1, 20->2, etc.)
 const DRAG_SENS = 0.9; // 1.0 = current feel, lower = less sensitive (e.g., 0.6–0.85)
+const FETCH_THROTTLE_MS = 80;
 
 
 // --- visual toggles ---
@@ -60,6 +61,9 @@ function App() {
     const velocity = useRef<{ vx: number; vy: number }>({ vx: 0, vy: 0 });
     const isInertial = useRef(false);
     const samples = useRef<Array<{ x: number; y: number; t: number }>>([]);
+
+    const lastRect = useRef<{ minX: number; minY: number; maxX: number; maxY: number } | null>(null);
+    const fetchTimer = useRef<number | null>(null);
 
 
 
@@ -99,6 +103,28 @@ function App() {
             });
 
         pending.current.set(k, run);
+    }
+
+    function currentTileRect(ctx: CanvasRenderingContext2D) {
+        const { cellX, cellY } = metrics(ctx);
+        const cv = canvasRef.current!;
+        const worldW = (cv.clientWidth || window.innerWidth) / VIEW_SCALE;
+        const worldH = (cv.clientHeight || window.innerHeight) / VIEW_SCALE;
+        const tilePxW = TILE_W * cellX, tilePxH = TILE_H * cellY;
+
+        const minTileX = Math.floor(cam.current.x / tilePxW) - 2;
+        const minTileY = Math.floor(cam.current.y / tilePxH) - 2;
+        const maxTileX = Math.floor((cam.current.x + worldW) / tilePxW) + 2;
+        const maxTileY = Math.floor((cam.current.y + worldH) / tilePxH) + 2;
+        return { minX: minTileX, minY: minTileY, maxX: maxTileX, maxY: maxTileY };
+    }
+
+    function scheduleViewportFetch() {
+        if (fetchTimer.current !== null) return; // already scheduled
+        fetchTimer.current = window.setTimeout(async () => {
+            fetchTimer.current = null;
+            await refreshViewport();
+        }, FETCH_THROTTLE_MS) as unknown as number;
     }
 
 
@@ -478,10 +504,10 @@ function App() {
 
         const tilePxW = TILE_W * cellX, tilePxH = TILE_H * cellY;
 
-        const minTileX = Math.floor(cam.current.x / tilePxW) - 1;
-        const minTileY = Math.floor(cam.current.y / tilePxH) - 1;
-        const maxTileX = Math.floor((cam.current.x + worldW) / tilePxW) + 1;
-        const maxTileY = Math.floor((cam.current.y + worldH) / tilePxH) + 1;
+        const minTileX = Math.floor(cam.current.x / tilePxW) - 2;
+        const minTileY = Math.floor(cam.current.y / tilePxH) - 2;
+        const maxTileX = Math.floor((cam.current.x + worldW) / tilePxW) + 2;
+        const maxTileY = Math.floor((cam.current.y + worldH) / tilePxH) + 2;
         const fetched = await fetchTiles(minTileX, maxTileX, minTileY, maxTileY);
 
         fetched.forEach((t: Tile) => tiles.current.set(key(t.x, t.y), t));
@@ -505,6 +531,7 @@ function App() {
             }
         }
         setVersionTick(v => v + 1);
+        lastRect.current = { minX: minTileX, minY: minTileY, maxX: maxTileX, maxY: maxTileY };
     }
 
     if (ensureCaretEdgeFollow()) { refreshViewport(); }
@@ -624,6 +651,17 @@ function App() {
         cam.current.x = dragging.current.startCamX - dx;
         cam.current.y = dragging.current.startCamY - dy;
 
+        {
+            const ctx = canvasRef.current!.getContext('2d')!;
+            const rect = currentTileRect(ctx);
+            if (!lastRect.current ||
+                rect.minX !== lastRect.current.minX || rect.maxX !== lastRect.current.maxX ||
+                rect.minY !== lastRect.current.minY || rect.maxY !== lastRect.current.maxY) {
+                lastRect.current = rect;
+                scheduleViewportFetch();
+            }
+        }
+
         const now = performance.now();
         samples.current.push({ x: e.clientX, y: e.clientY, t: now });
         while (samples.current.length > 2 && now - samples.current[0].t > SAMPLE_MS) {
@@ -736,6 +774,18 @@ function App() {
             // advance camera
             cam.current.x -= velocity.current.vx * dt;
             cam.current.y -= velocity.current.vy * dt;
+
+            {
+                const ctx = canvasRef.current!.getContext('2d')!;
+                const rect = currentTileRect(ctx);
+                if (!lastRect.current ||
+                    rect.minX !== lastRect.current.minX || rect.maxX !== lastRect.current.maxX ||
+                    rect.minY !== lastRect.current.minY || rect.maxY !== lastRect.current.maxY) {
+                    lastRect.current = rect;
+                    scheduleViewportFetch();
+                }
+            }
+
 
             // exponential decay
             const decay = Math.exp(-DECAY_PER_MS * dt);
