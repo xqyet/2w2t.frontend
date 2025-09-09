@@ -170,7 +170,7 @@ const SAMPLE_MS = 180;
 - Set the correct environment variables for API base and hub URL.
 
 ## Credits
-Inspired by YWOT (Your World of Text).
+Inspired by YWOT.
 2w2t tries to be leaner and faster via canvas rendering (fast chunks, no loading menu), viewport-driven fetching, and optimistic/ordered updates. 
 
 ## Quick FAQ
