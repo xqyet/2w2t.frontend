@@ -14,8 +14,7 @@ A fast, minimalist clone of **Your World of Text (YWOT)** with a focus on instan
 No thousands of DOM nodes. Everything is drawn to a single `<canvas>`, which keeps layout/paint overhead tiny.
 
 ### Tile-based world + viewport fetching
-The world is split into fixed-size tiles (`TILE_W × TILE_H` characters). On load and during pan/fling, the app fetches **only** the tiles in view (plus a small margin).  
-This dramatically reduces network and memory cost.
+The world is split into fixed-size tiles (`TILE_W × TILE_H` characters). On load and during pan/fling, the app fetches **only** the tiles in view (plus a small margin). This dramatically reduces network and memory cost.
 
 ### Optimistic local writes
 Keystrokes update the local tile buffer immediately and render on the next frame. The network patch is sent in the background and reconciled by tile version.
