@@ -25,6 +25,7 @@ const QUIET_DIST_PX = 6;   // movement less than this in that window counts as s
 const COORD_UNIT = 10; // show 1 per 10 characters (10->1, 20->2, etc.)
 const DRAG_SENS = 0.9; // 1.0 = current feel, lower = less sensitive (e.g., 0.6–0.85)
 const FETCH_THROTTLE_MS = 80;
+const PEER_TYPING_TTL_MS = 900; // how long the “black rect” stays visible
 
 
 // --- visual toggles ---
@@ -65,6 +66,9 @@ function App() {
     const lastRect = useRef<{ minX: number; minY: number; maxX: number; maxY: number } | null>(null);
     const fetchTimer = useRef<number | null>(null);
     const mobileInputRef = useRef<HTMLInputElement>(null);
+
+    const peerCarets = useRef<Map<string, { cx: number; cy: number; ts: number }>>(new Map());
+    const lastTypingSentAt = useRef(0);
 
     const isMobileInputFocused = () =>
         document.activeElement === mobileInputRef.current;
@@ -108,6 +112,17 @@ function App() {
 
         pending.current.set(k, run);
     }
+
+    function sendTyping(tx: number, ty: number, lx: number, ly: number) {
+        const now = performance.now();
+        if (now - lastTypingSentAt.current < 60) return; // throttle ~16fps+
+        lastTypingSentAt.current = now;
+
+        const hub = getHub();
+        // best-effort (ignore if not started yet)
+        hub.invoke('Typing', tx, ty, lx, ly).catch(() => { });
+    }
+
 
     function focusMobileInput() {
         // Focus only on coarse pointer/touch devices
@@ -165,9 +180,9 @@ function App() {
                 if (inProtected(snapCx, snapCy)) return;
 
                 caret.current.cx = snapCx;
-                const { tx, ty, offset } = tileForChar(snapCx, snapCy);
+                const { tx, ty, offset, lx, ly } = tileForChar(snapCx, snapCy);
                 const t = ensureTile(tx, ty);
-
+                sendTyping(tx, ty, lx, ly);
                 t.data = t.data.slice(0, offset) + ' ' + t.data.slice(offset + 1);
                 setVersionTick(v => v + 1);
 
@@ -190,8 +205,10 @@ function App() {
                     const snapCy = caret.current!.cy;
                     if (inProtected(snapCx, snapCy)) return;
 
-                    const { tx, ty, offset } = tileForChar(snapCx, snapCy);
+                    const { tx, ty, offset, lx, ly } = tileForChar(snapCx, snapCy);
                     const t = ensureTile(tx, ty);
+
+                    sendTyping(tx, ty, lx, ly);
 
                     t.data = t.data.slice(0, offset) + ch + t.data.slice(offset + 1);
                     setVersionTick(v => v + 1);
@@ -482,6 +499,23 @@ function App() {
                                 ctx.globalAlpha = alpha;
                                 ctx.fillStyle = isHighlighted ? '#fff' : '#000';
                                 ctx.fillText(ch, cellLeft + PAD_X, cellTop + PAD_Y);
+
+                                // draw peers typing as black rectangles for a short time
+                                {
+                                    const nowPeers = performance.now();
+                                    // we already have { cellX, cellY } from metrics(ctx) above
+                                    for (const [id, info] of [...peerCarets.current]) {
+                                        if (nowPeers - info.ts > PEER_TYPING_TTL_MS) {
+                                            peerCarets.current.delete(id);
+                                            continue;
+                                        }
+                                        const left = info.cx * cellX - cam.current.x;
+                                        const top = info.cy * cellY - cam.current.y;
+                                        ctx.fillStyle = '#000';
+                                        ctx.fillRect(left + 1, top + 1, cellX - 2, cellY - 2);
+                                    }
+                                }
+
                                 ctx.restore();
 
 
@@ -631,6 +665,14 @@ function App() {
             t.version = msg.version;
             setVersionTick(v => v + 1);
         });
+
+        hub.on('peerTyping', (msg: { x: number; y: number; col: number; row: number; sender: string }) => {
+            const cx = msg.x * TILE_W + msg.col;
+            const cy = msg.y * TILE_H + msg.row;
+            peerCarets.current.set(msg.sender, { cx, cy, ts: performance.now() });
+            setVersionTick(v => v + 1); // trigger a frame so it appears quickly
+        });
+
 
         hub.start().then(refreshViewport);
         return () => { hub.stop(); };
@@ -1034,8 +1076,9 @@ function App() {
                     const snapCy = caret.current.cy;
                     if (inProtected(snapCx, snapCy)) return;
 
-                    const { tx, ty, offset } = tileForChar(snapCx, snapCy);
+                    const { tx, ty, offset, lx, ly } = tileForChar(snapCx, snapCy);
                     const t = ensureTile(tx, ty);
+                    sendTyping(tx, ty, lx, ly);
 
                     t.data = t.data.slice(0, offset) + e.key + t.data.slice(offset + 1);
                     setVersionTick(v => v + 1);
