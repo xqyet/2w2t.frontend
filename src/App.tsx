@@ -64,6 +64,10 @@ function App() {
 
     const lastRect = useRef<{ minX: number; minY: number; maxX: number; maxY: number } | null>(null);
     const fetchTimer = useRef<number | null>(null);
+    const mobileInputRef = useRef<HTMLInputElement>(null);
+
+    const isMobileInputFocused = () =>
+        document.activeElement === mobileInputRef.current;
 
 
 
@@ -105,6 +109,18 @@ function App() {
         pending.current.set(k, run);
     }
 
+    function focusMobileInput() {
+        // Focus only on coarse pointer/touch devices
+        const isTouch =
+            (window.matchMedia && window.matchMedia('(pointer: coarse)').matches) ||
+            'ontouchstart' in window || navigator.maxTouchPoints > 0;
+
+        if (!isTouch) return;
+
+        const el = mobileInputRef.current;
+        if (el) el.focus({ preventScroll: true });
+    }
+
     function currentTileRect(ctx: CanvasRenderingContext2D) {
         const { cellX, cellY } = metrics(ctx);
         const cv = canvasRef.current!;
@@ -127,7 +143,76 @@ function App() {
         }, FETCH_THROTTLE_MS) as unknown as number;
     }
 
+    function onMobileInput(e: React.FormEvent<HTMLInputElement>) {
+        if (!caret.current) {
+            // nothing selected to type into
+            (e.currentTarget as HTMLInputElement).value = '';
+            return;
+        }
 
+        const el = e.currentTarget;
+        // React's nativeEvent gives us inputType (insertText, deleteContentBackward, etc.)
+        const ne = e.nativeEvent as unknown as InputEvent;
+        const inputType = (ne && (ne as any).inputType) || '';
+
+        // Backspace (delete)
+        if (inputType === 'deleteContentBackward') {
+            // mirror your Backspace branch
+            enqueueEdit(() => {
+                if (!caret.current) return;
+                const snapCx = caret.current.cx - 1;
+                const snapCy = caret.current.cy;
+                if (inProtected(snapCx, snapCy)) return;
+
+                caret.current.cx = snapCx;
+                const { tx, ty, offset } = tileForChar(snapCx, snapCy);
+                const t = ensureTile(tx, ty);
+
+                t.data = t.data.slice(0, offset) + ' ' + t.data.slice(offset + 1);
+                setVersionTick(v => v + 1);
+
+                if (ensureCaretEdgeFollow()) { refreshViewport(); }
+
+                markRecent(snapCx, snapCy);
+                queuePatch(t, offset, ' ');
+            });
+            el.value = '';
+            return;
+        }
+
+        // Regular character input (could be multi-codepoint like emoji)
+        const val = el.value;
+        if (val) {
+            for (const ch of Array.from(val)) {
+                enqueueEdit(() => {
+                    if (!caret.current) return;
+                    const snapCx = caret.current!.cx;
+                    const snapCy = caret.current!.cy;
+                    if (inProtected(snapCx, snapCy)) return;
+
+                    const { tx, ty, offset } = tileForChar(snapCx, snapCy);
+                    const t = ensureTile(tx, ty);
+
+                    t.data = t.data.slice(0, offset) + ch + t.data.slice(offset + 1);
+                    setVersionTick(v => v + 1);
+
+                    markRecent(snapCx, snapCy);
+                    queuePatch(t, offset, ch);
+
+                    if (caret.current) {
+                        caret.current.cx = snapCx + 1;
+                        setVersionTick(v => v + 1);
+                        if (ensureCaretEdgeFollow()) { refreshViewport(); }
+                    }
+                });
+            }
+            el.value = ''; // clear so next keystroke arrives clean
+        }
+    }
+
+    function keepFocusIfEditing() {
+        if (caret.current) setTimeout(() => focusMobileInput(), 0);
+    }
 
     function ensureCaretEdgeFollow(): boolean {
         if (!caret.current) return false;
@@ -554,6 +639,7 @@ function App() {
 
     useEffect(() => {
         function onPaste(e: ClipboardEvent) {
+            if (isMobileInputFocused()) return; 
             if (!caret.current) return;
 
             const text = e.clipboardData?.getData('text') ?? '';
@@ -862,6 +948,7 @@ function App() {
 
         ensureTile(tx, ty);
         caret.current = { cx, cy, anchorCx: cx }; // remember starting column
+        focusMobileInput();
         setVersionTick(v => v + 1);
     }
 
@@ -869,6 +956,9 @@ function App() {
     // keyboard typing
     useEffect(() => {
         function onKey(e: KeyboardEvent) {
+
+            if (isMobileInputFocused()) return;
+
             if (!caret.current) return;
 
             // Ignore modifier combos and non-text keys we handle separately
@@ -989,6 +1079,29 @@ function App() {
                 onTouchStart={onTouchStart}
                 onTouchMove={onTouchMove}
                 onTouchEnd={onTouchEnd}
+            />
+            <input
+                ref={mobileInputRef}
+                type="text"
+                inputMode="text"
+                enterKeyHint="enter"
+                autoCapitalize="off"
+                autoCorrect="off"
+                spellCheck={false}
+                // Keep it effectively invisible but focusable
+                style={{
+                    position: 'fixed',
+                    opacity: 0,
+                    left: 0,
+                    top: 0,
+                    width: 1,
+                    height: 1,
+                    padding: 0,
+                    border: 0,
+                    background: 'transparent'
+                }}
+                onInput={onMobileInput}
+                onBlur={keepFocusIfEditing}
             />
         </>
     );
