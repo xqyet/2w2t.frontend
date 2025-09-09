@@ -76,7 +76,9 @@ function App() {
     // Serial queue to guarantee ordering of caret moves + patches
     const inputQueue = useRef<Promise<void>>(Promise.resolve());
     const tapStart = useRef<{ x: number; y: number; t: number } | null>(null);
-const lastTouch = useRef<{ x: number; y: number } | null>(null);
+    const lastTouch = useRef<{ x: number; y: number } | null>(null);
+    const followCaret = useRef(false);
+    const ZWS = '\u200B';
     function enqueueEdit(fn: () => Promise<void> | void) {
         inputQueue.current = inputQueue.current.then(async () => { await fn(); });
         return inputQueue.current.catch(() => { }); // swallow to keep chain alive
@@ -124,7 +126,15 @@ const lastTouch = useRef<{ x: number; y: number } | null>(null);
 
         const el = mobileInputRef.current;
         if (el) el.focus({ preventScroll: true });
+        primeMobileInput(); 
     }
+    function primeMobileInput() {
+        const el = mobileInputRef.current;
+        if (!el) return;
+        el.value = ZWS;
+        try { el.setSelectionRange(1, 1); } catch { }
+    }
+
     function currentTileRect(ctx: CanvasRenderingContext2D) {
         const { cellX, cellY } = metrics(ctx);
         const cv = canvasRef.current!;
@@ -145,20 +155,15 @@ const lastTouch = useRef<{ x: number; y: number } | null>(null);
             await refreshViewport();
         }, FETCH_THROTTLE_MS) as unknown as number;
     }
-    function onMobileInput(e: React.FormEvent<HTMLInputElement>) {
-        if (!caret.current) {
-            // nothing selected to type into
-            (e.currentTarget as HTMLInputElement).value = '';
-            return;
-        }
-        const el = e.currentTarget;
-        // React's nativeEvent gives us inputType (insertText, deleteContentBackward, etc.)
+    function onMobileBeforeInput(e: React.FormEvent<HTMLInputElement>) {
+        if (!caret.current) return;
         const ne = e.nativeEvent as unknown as InputEvent;
-        const inputType = (ne && (ne as any).inputType) || '';
+        const type = (ne && (ne as any).inputType) || '';
 
-        // Backspace (delete)
-        if (inputType === 'deleteContentBackward') {
-            // mirror your Backspace branch
+        // cover long-press variants too
+        if (type === 'deleteContentBackward' || type === 'deleteWordBackward' || type === 'deleteHardLineBackward') {
+            e.preventDefault(); // keep our sentinel in place
+
             enqueueEdit(() => {
                 if (!caret.current) return;
                 const snapCx = caret.current.cx - 1;
@@ -166,35 +171,80 @@ const lastTouch = useRef<{ x: number; y: number } | null>(null);
                 if (inProtected(snapCx, snapCy)) return;
 
                 caret.current.cx = snapCx;
+                const { tx, ty, offset } = tileForChar(snapCx, snapCy);
+                sendTyping(tx, ty, offset % TILE_W, Math.floor(offset / TILE_W));
+                const t = ensureTile(tx, ty);
+
+                t.data = t.data.slice(0, offset) + ' ' + t.data.slice(offset + 1);
+                setVersionTick(v => v + 1);
+                markRecent(snapCx, snapCy);
+                queuePatch(t, offset, ' ');
+                followCaret.current = true;
+                if (ensureCaretEdgeFollow()) { refreshViewport(); }
+            });
+
+            // re-prime so the next backspace still fires
+            primeMobileInput();
+        }
+    }
+
+    function onMobileInput(e: React.FormEvent<HTMLInputElement>) {
+        if (!caret.current) {
+            // nothing selected to type into
+            (e.currentTarget as HTMLInputElement).value = '';
+            primeMobileInput();
+            return;
+        }
+
+        const el = e.currentTarget;
+        const ne = e.nativeEvent as unknown as InputEvent;
+        const inputType = (ne && (ne as any).inputType) || '';
+
+        // Fallback: if we do get a delete here, handle it (main path is onBeforeInput)
+        if (inputType && inputType.startsWith('delete')) {
+            enqueueEdit(() => {
+                if (!caret.current) return;
+                const snapCx = caret.current.cx - 1;
+                const snapCy = caret.current.cy;
+                if (inProtected(snapCx, snapCy)) return;
+
+                caret.current.cx = snapCx;
+
                 const { tx, ty, offset, lx, ly } = tileForChar(snapCx, snapCy);
                 sendTyping(tx, ty, lx, ly);
+
                 const t = ensureTile(tx, ty);
                 t.data = t.data.slice(0, offset) + ' ' + t.data.slice(offset + 1);
                 setVersionTick(v => v + 1);
 
-                if (ensureCaretEdgeFollow()) { refreshViewport(); }
-
                 markRecent(snapCx, snapCy);
                 queuePatch(t, offset, ' ');
+
+                followCaret.current = true;
+                if (ensureCaretEdgeFollow()) { refreshViewport(); }
             });
+
+            // keep the hidden input primed so the next backspace still fires
             el.value = '';
+            primeMobileInput();
             return;
         }
 
-        // Regular character input (could be multi-codepoint like emoji)
-        const val = el.value;
-        if (val) {
-            for (const ch of Array.from(val)) {
+        // Regular character input (strip the sentinel first)
+        const typed = el.value.split(ZWS).join('');
+        if (typed) {
+            for (const ch of Array.from(typed)) {
                 enqueueEdit(() => {
                     if (!caret.current) return;
+
                     const snapCx = caret.current!.cx;
                     const snapCy = caret.current!.cy;
                     if (inProtected(snapCx, snapCy)) return;
 
                     const { tx, ty, offset, lx, ly } = tileForChar(snapCx, snapCy);
                     sendTyping(tx, ty, lx, ly);
-                    const t = ensureTile(tx, ty);
 
+                    const t = ensureTile(tx, ty);
                     t.data = t.data.slice(0, offset) + ch + t.data.slice(offset + 1);
                     setVersionTick(v => v + 1);
 
@@ -204,13 +254,18 @@ const lastTouch = useRef<{ x: number; y: number } | null>(null);
                     if (caret.current) {
                         caret.current.cx = snapCx + 1;
                         setVersionTick(v => v + 1);
+                        followCaret.current = true;
                         if (ensureCaretEdgeFollow()) { refreshViewport(); }
                     }
                 });
             }
-            el.value = ''; // clear so next keystroke arrives clean
         }
+
+        // clear and re-prime so the field is never empty
+        el.value = '';
+        primeMobileInput();
     }
+
 
     function keepFocusIfEditing() {
         if (caret.current) setTimeout(() => focusMobileInput(), 0);
@@ -633,7 +688,7 @@ const lastTouch = useRef<{ x: number; y: number } | null>(null);
         lastRect.current = { minX: minTileX, minY: minTileY, maxX: maxTileX, maxY: maxTileY };
     }
 
-    if (ensureCaretEdgeFollow()) { refreshViewport(); }
+   
 
     // boot: hub + initial viewport
     useEffect(() => {
@@ -690,7 +745,9 @@ const lastTouch = useRef<{ x: number; y: number } | null>(null);
             // advance caret
             caret.current.cx += 1;
 
-            if (ensureCaretEdgeFollow()) { refreshViewport(); }
+            followCaret.current = true;
+
+            if (followCaret.current && ensureCaretEdgeFollow()) { refreshViewport(); }
 
             // Optional: prevent the browser from trying to paste into the page
             e.preventDefault();
@@ -718,6 +775,7 @@ const lastTouch = useRef<{ x: number; y: number } | null>(null);
 
     // mouse pan (reversed like YWOT)
     function onMouseDown(e: React.MouseEvent<HTMLCanvasElement>) {
+        followCaret.current = false;
         dragging.current = {
             startMouseX: e.clientX,
             startMouseY: e.clientY,
@@ -822,6 +880,7 @@ const lastTouch = useRef<{ x: number; y: number } | null>(null);
     function firstTouch(e: TouchEvent) { return e.changedTouches[0]; }
 
     function onTouchStart(e: React.TouchEvent<HTMLCanvasElement>) {
+        followCaret.current = false;
         e.preventDefault();
 
         const t = firstTouch(e.nativeEvent);
@@ -953,7 +1012,7 @@ const lastTouch = useRef<{ x: number; y: number } | null>(null);
         const screenWorldX = (clientX - rect.left) / VIEW_SCALE;
         const screenWorldY = (clientY - rect.top) / VIEW_SCALE;
 
-        // link hit-test (same space you recorded them)
+        // If the tap is on a plaza link, open it and bail
         for (const a of linkAreas.current) {
             if (
                 screenWorldX >= a.x && screenWorldX <= a.x + a.w &&
@@ -964,7 +1023,7 @@ const lastTouch = useRef<{ x: number; y: number } | null>(null);
             }
         }
 
-        // convert to world coords, compute cell
+        // Convert to world coords, compute cell
         const worldX = screenWorldX + cam.current.x;
         const worldY = screenWorldY + cam.current.y;
 
@@ -979,16 +1038,19 @@ const lastTouch = useRef<{ x: number; y: number } | null>(null);
         const cx = tx * TILE_W + lx;
         const cy = ty * TILE_H + ly;
 
-        // ignore protected area
+        // Ignore protected area
         const clickedCx = Math.floor(worldX / cellX);
         const clickedCy = Math.floor(worldY / cellY);
         if (inProtected(clickedCx, clickedCy)) return;
 
         ensureTile(tx, ty);
         caret.current = { cx, cy, anchorCx: cx };
+
+        // Do NOT re-enable follow here; let typing turn it back on
         focusMobileInput();
         setVersionTick(v => v + 1);
     }
+
 
     function onClick(e: React.MouseEvent<HTMLCanvasElement>) {
         const cv = e.currentTarget;
@@ -1075,25 +1137,30 @@ const lastTouch = useRef<{ x: number; y: number } | null>(null);
                 caret.current.cy += 1;
                 caret.current.cx = caret.current.anchorCx;
                 setVersionTick(v => v + 1);
-                if (ensureCaretEdgeFollow()) { refreshViewport(); }
+                followCaret.current = true;
+                if (followCaret.current && ensureCaretEdgeFollow()) { refreshViewport(); }
                 return;
             }
 
             // Arrow keys move caret only
             if (e.key === 'ArrowLeft') {
-                caret.current.cx -= 1; setVersionTick(v => v + 1); if (ensureCaretEdgeFollow()) { refreshViewport(); }
+                caret.current.cx -= 1; setVersionTick(v => v + 1); followCaret.current = true; if (followCaret.current && ensureCaretEdgeFollow()) { refreshViewport(); }
+
                 return;
             }
             if (e.key === 'ArrowRight') {
-                caret.current.cx += 1; setVersionTick(v => v + 1); if (ensureCaretEdgeFollow()) { refreshViewport(); }
+                caret.current.cx += 1; setVersionTick(v => v + 1); followCaret.current = true; if (followCaret.current && ensureCaretEdgeFollow()) { refreshViewport(); }
+
                 return;
             }
             if (e.key === 'ArrowUp') {
-                caret.current.cy -= 1; setVersionTick(v => v + 1); if (ensureCaretEdgeFollow()) { refreshViewport(); }
+                caret.current.cy -= 1; setVersionTick(v => v + 1); followCaret.current = true; if (followCaret.current && ensureCaretEdgeFollow()) { refreshViewport(); }
+
                 return;
             }
             if (e.key === 'ArrowDown') {
-                caret.current.cy += 1; setVersionTick(v => v + 1); if (ensureCaretEdgeFollow()) { refreshViewport(); }
+                caret.current.cy += 1; setVersionTick(v => v + 1); followCaret.current = true; if (followCaret.current && ensureCaretEdgeFollow()) { refreshViewport(); }
+
                 return;
             }
 
@@ -1113,8 +1180,8 @@ const lastTouch = useRef<{ x: number; y: number } | null>(null);
 
                     t.data = t.data.slice(0, offset) + ' ' + t.data.slice(offset + 1);
                     setVersionTick(v => v + 1);
-
-                    if (ensureCaretEdgeFollow()) { refreshViewport(); }
+                    followCaret.current = true;
+                    if (followCaret.current && ensureCaretEdgeFollow()) { refreshViewport(); }
 
                     markRecent(snapCx, snapCy);
                     queuePatch(t, offset, ' ');
@@ -1145,6 +1212,8 @@ const lastTouch = useRef<{ x: number; y: number } | null>(null);
                     if (caret.current) {
                         caret.current.cx = snapCx + 1;
                         setVersionTick(v => v + 1);
+                        followCaret.current = true;
+                        if (ensureCaretEdgeFollow()) { refreshViewport(); }
                     }
                 });
                 return;
@@ -1197,6 +1266,7 @@ const lastTouch = useRef<{ x: number; y: number } | null>(null);
                     border: 0,
                     background: 'transparent'
                 }}
+                onBeforeInput={onMobileBeforeInput} 
                 onInput={onMobileInput}
                 onBlur={keepFocusIfEditing}
             />
