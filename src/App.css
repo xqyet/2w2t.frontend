@@ -21,7 +21,7 @@ canvas {
     display: block;
     width: 100vw;
     height: 100vh;
-    touch-action: none; /* let your handlers own the pan/zoom */
-    -ms-touch-action: none; /* old Edge */
+    touch-action: none; 
+    -ms-touch-action: none; 
 }
-/* <-- give the canvas size */
+

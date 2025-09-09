@@ -24,7 +24,7 @@ const QUIET_WINDOW_MS = 25; // if the last ~100ms were nearly still, don't fling
 const QUIET_DIST_PX = 6;   // movement less than this in that window counts as still
 const COORD_UNIT = 10; // show 1 per 10 characters (10->1, 20->2, etc.)
 const DRAG_SENS = 0.9; // 1.0 = current feel, lower = less sensitive (e.g., 0.6–0.85)
-const FETCH_THROTTLE_MS = 80;
+const FETCH_THROTTLE_MS = 80; // viewport fetch for page reload
 const PEER_TYPING_TTL_MS = 900; // how long the “black rect” stays visible
 
 
@@ -39,11 +39,12 @@ const PROTECT = { x: -10, y: -10, w: 30, h: 13 };
 // text/links to show inside the plaza (centered)
 const PLAZA_LINES: Array<{ text: string; link?: string; gap?: number }> = [
     { text: '2W2T', },
-    { text: '~2writers2tiles~', gap: 12 },// extra margin below the title (pixels)
+    { text: '~2writers2tiles~', gap: 8 },// extra margin below the title (pixels)
     { text: 'An Infinite Void to\nwrite, create, and destroy', gap: 8 }, // newline after "Void to"
     { text: 'Chat with other users you find\nin the void!', gap:8 },
     { text: 'How to Paste ASCII Art', link: 'https://github.com/xqyet/2w2t.ASCII', gap:10 },
-    { text: '~xqyet~', link: 'https://xqyet.dev/' },
+    { text: '~xqyet~', link: 'https://xqyet.dev/', gap:6 },
+    { text: '~~source code~~', link: 'https://github.com/xqyet/2w2t.frontend' },
 
 ];
 
@@ -57,39 +58,31 @@ function App() {
     const [versionTick, setVersionTick] = useState(0);
     const cam = useRef<Camera>({ x: 0, y: 0 });
     const dragging = useRef<null | { startMouseX: number; startMouseY: number; startCamX: number; startCamY: number }>(null);
-    // caret in absolute character coordinates (worldwide), + anchor column for Enter
     const caret = useRef<{ cx: number; cy: number; anchorCx: number } | null>(null);
     const velocity = useRef<{ vx: number; vy: number }>({ vx: 0, vy: 0 });
     const isInertial = useRef(false);
     const samples = useRef<Array<{ x: number; y: number; t: number }>>([]);
-
     const lastRect = useRef<{ minX: number; minY: number; maxX: number; maxY: number } | null>(null);
     const fetchTimer = useRef<number | null>(null);
     const mobileInputRef = useRef<HTMLInputElement>(null);
-
     const peerCarets = useRef<Map<string, { cx: number; cy: number; ts: number }>>(new Map());
     const lastTypingSentAt = useRef(0);
-
     const isMobileInputFocused = () =>
         document.activeElement === mobileInputRef.current;
-
-
 
     const linkAreas = useRef<{ x: number; y: number; w: number; h: number; url: string }[]>([]);
     // recent writes: key = "cx,cy" (absolute char coords), value = timestamp (ms)
     const recentWrites = useRef<Map<string, number>>(new Map());
-
     // Serial queue to guarantee ordering of caret moves + patches
     const inputQueue = useRef<Promise<void>>(Promise.resolve());
-
+    const tapStart = useRef<{ x: number; y: number; t: number } | null>(null);
+const lastTouch = useRef<{ x: number; y: number } | null>(null);
     function enqueueEdit(fn: () => Promise<void> | void) {
         inputQueue.current = inputQueue.current.then(async () => { await fn(); });
         return inputQueue.current.catch(() => { }); // swallow to keep chain alive
     }
-
     // Queue of in-flight network patches per tile key
     const pending = useRef<Map<TileKey, Promise<void>>>(new Map());
-
     function queuePatch(t: Tile, offset: number, ch: string) {
         const k = key(t.x, t.y);
         const prev = pending.current.get(k) ?? Promise.resolve();
@@ -112,7 +105,6 @@ function App() {
 
         pending.current.set(k, run);
     }
-
     function sendTyping(tx: number, ty: number, lx: number, ly: number) {
         const now = performance.now();
         if (now - lastTypingSentAt.current < 60) return; // throttle ~16fps+
@@ -122,8 +114,6 @@ function App() {
         // best-effort (ignore if not started yet)
         hub.invoke('Typing', tx, ty, lx, ly).catch(() => { });
     }
-
-
     function focusMobileInput() {
         // Focus only on coarse pointer/touch devices
         const isTouch =
@@ -135,7 +125,6 @@ function App() {
         const el = mobileInputRef.current;
         if (el) el.focus({ preventScroll: true });
     }
-
     function currentTileRect(ctx: CanvasRenderingContext2D) {
         const { cellX, cellY } = metrics(ctx);
         const cv = canvasRef.current!;
@@ -149,7 +138,6 @@ function App() {
         const maxTileY = Math.floor((cam.current.y + worldH) / tilePxH) + 2;
         return { minX: minTileX, minY: minTileY, maxX: maxTileX, maxY: maxTileY };
     }
-
     function scheduleViewportFetch() {
         if (fetchTimer.current !== null) return; // already scheduled
         fetchTimer.current = window.setTimeout(async () => {
@@ -157,14 +145,12 @@ function App() {
             await refreshViewport();
         }, FETCH_THROTTLE_MS) as unknown as number;
     }
-
     function onMobileInput(e: React.FormEvent<HTMLInputElement>) {
         if (!caret.current) {
             // nothing selected to type into
             (e.currentTarget as HTMLInputElement).value = '';
             return;
         }
-
         const el = e.currentTarget;
         // React's nativeEvent gives us inputType (insertText, deleteContentBackward, etc.)
         const ne = e.nativeEvent as unknown as InputEvent;
@@ -253,7 +239,6 @@ function App() {
         let moved = false;
 
         // --- horizontal: keep the whole caret cell visible and glued to edges ---
-        // left edge: if caret's left goes off-screen, align left edge to caret left
         if (cX < left) {
             cam.current.x = cX;
             moved = true;
@@ -276,7 +261,6 @@ function App() {
 
         return moved;
     }
-
 
     function markRecent(cx: number, cy: number) {
         recentWrites.current.set(`${cx},${cy}`, performance.now());
@@ -369,7 +353,7 @@ function App() {
 
             const lineAdvance = FONT_PX + PAD_Y * 2;
             const totalHeight = PLAZA_LINES.length * lineAdvance;
-            let yStart = plazaTop + (plazaHpx - totalHeight) / 2-30;
+            let yStart = plazaTop + (plazaHpx - totalHeight) / 2-40;
 
             for (const line of PLAZA_LINES) {
                 const parts = line.text.split('\n');
@@ -477,8 +461,6 @@ function App() {
 
                                 // ? don’t draw any character that’s inside the protected box
                                 if (suppressed) continue;
-
-                                // ? don’t draw any character that’s inside the protected box
                                 if (suppressed) continue;
 
                                 // Fade-in alpha if this absolute cell was just written
@@ -602,12 +584,8 @@ function App() {
                 ctx.restore();
             }
 
-
-
-
             af = requestAnimationFrame(draw);
         }
-
 
         af = requestAnimationFrame(draw);
         return () => { cancelAnimationFrame(af); window.removeEventListener('resize', resize); };
@@ -675,7 +653,6 @@ function App() {
             setVersionTick(v => v + 1); // trigger a frame so it appears quickly
         });
 
-
         hub.start().then(refreshViewport);
         return () => { hub.stop(); };
         // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -723,7 +700,6 @@ function App() {
         return () => window.removeEventListener('paste', onPaste);
     }, []);
 
-
     // Prefetch + center camera at (0,0) on first render
     useEffect(() => {
         const cv = canvasRef.current;
@@ -751,6 +727,7 @@ function App() {
         isInertial.current = false; // stop any running inertia
         samples.current = [{ x: e.clientX, y: e.clientY, t: performance.now() }];
     }
+
     function onMouseMove(e: React.MouseEvent<HTMLCanvasElement>) {
         const cv = e.currentTarget;
 
@@ -798,7 +775,6 @@ function App() {
             samples.current.shift();
         }
     }
-
     async function onMouseUp() {
         if (!dragging.current) return;
         dragging.current = null;
@@ -838,20 +814,20 @@ function App() {
             }
         }
 
-        // no fling
+        // wait
         await refreshViewport();
     }
 
-    // --- touch helpers (map to your existing mouse logic) ---
-    function firstTouch(e: TouchEvent) {
-        return e.changedTouches[0];
-    }
+    // --- touch helpers (mapping to existing mouse logic) ---
+    function firstTouch(e: TouchEvent) { return e.changedTouches[0]; }
 
     function onTouchStart(e: React.TouchEvent<HTMLCanvasElement>) {
-        // allow panning instead of page scroll
         e.preventDefault();
 
         const t = firstTouch(e.nativeEvent);
+        tapStart.current = { x: t.clientX, y: t.clientY, t: performance.now() };
+        lastTouch.current = { x: t.clientX, y: t.clientY };
+
         dragging.current = {
             startMouseX: t.clientX,
             startMouseY: t.clientY,
@@ -867,6 +843,7 @@ function App() {
         if (!dragging.current) return;
 
         const t = firstTouch(e.nativeEvent);
+        lastTouch.current = { x: t.clientX, y: t.clientY };
 
         const rawDx = (t.clientX - dragging.current.startMouseX) / VIEW_SCALE;
         const rawDy = (t.clientY - dragging.current.startMouseY) / VIEW_SCALE;
@@ -877,6 +854,16 @@ function App() {
         cam.current.x = dragging.current.startCamX - dx;
         cam.current.y = dragging.current.startCamY - dy;
 
+        // schedule fetch like mouse-move
+        const ctx = canvasRef.current!.getContext('2d')!;
+        const rect = currentTileRect(ctx);
+        if (!lastRect.current ||
+            rect.minX !== lastRect.current.minX || rect.maxX !== lastRect.current.maxX ||
+            rect.minY !== lastRect.current.minY || rect.maxY !== lastRect.current.maxY) {
+            lastRect.current = rect;
+            scheduleViewportFetch();
+        }
+
         const now = performance.now();
         samples.current.push({ x: t.clientX, y: t.clientY, t: now });
         while (samples.current.length > 2 && now - samples.current[0].t > SAMPLE_MS) {
@@ -886,8 +873,33 @@ function App() {
 
     function onTouchEnd(e: React.TouchEvent<HTMLCanvasElement>) {
         e.preventDefault();
-        // reuse your mouse-up logic (fling + refresh)
+
+        const start = tapStart.current;
+        const last = lastTouch.current;
+        tapStart.current = null;
+
+        if (start && last) {
+            const dt = performance.now() - start.t;
+            const dist = Math.hypot(last.x - start.x, last.y - start.y);
+            const TAP_MAX_DT = 300;   // ms
+            const TAP_MAX_DIST = 10;  // px
+
+            // treat as tap: place caret & focus input
+            if (dt <= TAP_MAX_DT && dist <= TAP_MAX_DIST) {
+                dragging.current = null; // cancel any drag
+                setCaretFromClientPoint(last.x, last.y);
+                return;
+            }
+        }
+
+        // otherwise, end drag and maybe fling
         onMouseUp();
+    }
+
+    function onTouchCancel() {
+        tapStart.current = null;
+        lastTouch.current = null;
+        dragging.current = null;
     }
 
 
@@ -915,8 +927,6 @@ function App() {
                     scheduleViewportFetch();
                 }
             }
-
-
             // exponential decay
             const decay = Math.exp(-DECAY_PER_MS * dt);
             velocity.current.vx *= decay;
@@ -934,10 +944,52 @@ function App() {
         requestAnimationFrame(step);
     }
 
+    function setCaretFromClientPoint(clientX: number, clientY: number) {
+        const cv = canvasRef.current!;
+        const ctx = cv.getContext('2d')!;
+        const { cellX, cellY } = metrics(ctx);
 
+        const rect = cv.getBoundingClientRect();
+        const screenWorldX = (clientX - rect.left) / VIEW_SCALE;
+        const screenWorldY = (clientY - rect.top) / VIEW_SCALE;
 
+        // link hit-test (same space you recorded them)
+        for (const a of linkAreas.current) {
+            if (
+                screenWorldX >= a.x && screenWorldX <= a.x + a.w &&
+                screenWorldY >= a.y && screenWorldY <= a.y + a.h
+            ) {
+                window.open(a.url, '_blank', 'noopener,noreferrer');
+                return;
+            }
+        }
 
-    // click sets caret
+        // convert to world coords, compute cell
+        const worldX = screenWorldX + cam.current.x;
+        const worldY = screenWorldY + cam.current.y;
+
+        const tilePxW = TILE_W * cellX, tilePxH = TILE_H * cellY;
+        const tx = Math.floor(worldX / tilePxW);
+        const ty = Math.floor(worldY / tilePxH);
+        const rx = mod(worldX, tilePxW);
+        const ry = mod(worldY, tilePxH);
+        const lx = Math.floor(rx / cellX);
+        const ly = Math.floor(ry / cellY);
+
+        const cx = tx * TILE_W + lx;
+        const cy = ty * TILE_H + ly;
+
+        // ignore protected area
+        const clickedCx = Math.floor(worldX / cellX);
+        const clickedCy = Math.floor(worldY / cellY);
+        if (inProtected(clickedCx, clickedCy)) return;
+
+        ensureTile(tx, ty);
+        caret.current = { cx, cy, anchorCx: cx };
+        focusMobileInput();
+        setVersionTick(v => v + 1);
+    }
+
     function onClick(e: React.MouseEvent<HTMLCanvasElement>) {
         const cv = e.currentTarget;
         const ctx = cv.getContext('2d')!;
@@ -995,7 +1047,6 @@ function App() {
         focusMobileInput();
         setVersionTick(v => v + 1);
     }
-
 
     // keyboard typing
     useEffect(() => {
@@ -1105,9 +1156,6 @@ function App() {
         window.addEventListener('keydown', onKey);
         return () => window.removeEventListener('keydown', onKey);
     }, []);
-
-
-
     return (
         <>
             <div className="toolbar">
@@ -1117,6 +1165,7 @@ function App() {
 
             <canvas
                 ref={canvasRef}
+                style={{ touchAction: 'none' }}
                 onMouseDown={onMouseDown}
                 onMouseMove={onMouseMove}
                 onMouseUp={onMouseUp}
@@ -1126,6 +1175,7 @@ function App() {
                 onTouchStart={onTouchStart}
                 onTouchMove={onTouchMove}
                 onTouchEnd={onTouchEnd}
+                onTouchCancel={onTouchCancel}
             />
             <input
                 ref={mobileInputRef}
