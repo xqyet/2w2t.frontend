@@ -6,9 +6,13 @@ A fast, minimalist clone of **Your World of Text (YWOT)** with a focus on instan
 
 ---
 
-## Why it’s faster than YWOT (design choices)
+<p align="center">
+  <img src="2w2t.png" alt="Example">
+</p>
 
-2w2t was built to feel instant on load and snappy during edits. The main tricks:
+# Why it’s faster than YWOT (and other design choices)
+
+ ---> 2w2t was built to feel instant on load and snappy during edits. The main tricks:
 
 ### Canvas-only rendering
 No thousands of DOM nodes. Everything is drawn to a single `<canvas>`, which keeps layout/paint overhead tiny.
@@ -36,7 +40,6 @@ Plain React + TypeScript + a handful of small utilities. Most logic lives in `Ap
 - Fast viewport-based tile loading  
 - Optimistic typing with versioned conflict safety  
 - Peer presence/typing indicators (simple “black rect” caret)  
-- Protected plaza at the center with custom lines/links  
 - Keyboard & touch friendly  
 - Minimal UI chrome, easy to theme/tune via constants  
 
@@ -165,11 +168,6 @@ const SAMPLE_MS = 180;
 - Make sure the deployed site can reach your backend domain/port and that CORS is configured on the backend for the site’s origin.
 
 - Set the correct environment variables for API base and hub URL.
-
-## Contributing
-
-Issues and PRs welcome!
-Please keep contributions focused and small; **performance** is the first-class goal.
 
 ## Credits
 Inspired by YWOT (Your World of Text).
