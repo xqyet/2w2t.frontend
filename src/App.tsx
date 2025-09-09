@@ -181,8 +181,8 @@ function App() {
 
                 caret.current.cx = snapCx;
                 const { tx, ty, offset, lx, ly } = tileForChar(snapCx, snapCy);
-                const t = ensureTile(tx, ty);
                 sendTyping(tx, ty, lx, ly);
+                const t = ensureTile(tx, ty);
                 t.data = t.data.slice(0, offset) + ' ' + t.data.slice(offset + 1);
                 setVersionTick(v => v + 1);
 
@@ -206,9 +206,8 @@ function App() {
                     if (inProtected(snapCx, snapCy)) return;
 
                     const { tx, ty, offset, lx, ly } = tileForChar(snapCx, snapCy);
-                    const t = ensureTile(tx, ty);
-
                     sendTyping(tx, ty, lx, ly);
+                    const t = ensureTile(tx, ty);
 
                     t.data = t.data.slice(0, offset) + ch + t.data.slice(offset + 1);
                     setVersionTick(v => v + 1);
@@ -500,17 +499,20 @@ function App() {
                                 ctx.fillStyle = isHighlighted ? '#fff' : '#000';
                                 ctx.fillText(ch, cellLeft + PAD_X, cellTop + PAD_Y);
 
-                                // draw peers typing as black rectangles for a short time
                                 {
                                     const nowPeers = performance.now();
-                                    // we already have { cellX, cellY } from metrics(ctx) above
                                     for (const [id, info] of [...peerCarets.current]) {
                                         if (nowPeers - info.ts > PEER_TYPING_TTL_MS) {
                                             peerCarets.current.delete(id);
                                             continue;
                                         }
+                                        // use the top-level cellX/cellY computed at the start of draw()
                                         const left = info.cx * cellX - cam.current.x;
                                         const top = info.cy * cellY - cam.current.y;
+
+                                        // (optional: cull if off-screen)
+                                        // if (left + cellX < 0 || top + cellY < 0 || left > worldW || top > worldH) continue;
+
                                         ctx.fillStyle = '#000';
                                         ctx.fillRect(left + 1, top + 1, cellX - 2, cellY - 2);
                                     }
@@ -1054,7 +1056,8 @@ function App() {
                     if (inProtected(snapCx, snapCy)) return;
 
                     caret.current.cx = snapCx;
-                    const { tx, ty, offset } = tileForChar(snapCx, snapCy);
+                    const { tx, ty, offset, lx, ly } = tileForChar(snapCx, snapCy);
+                    sendTyping(tx, ty, lx, ly);
                     const t = ensureTile(tx, ty);
 
                     t.data = t.data.slice(0, offset) + ' ' + t.data.slice(offset + 1);
@@ -1077,8 +1080,9 @@ function App() {
                     if (inProtected(snapCx, snapCy)) return;
 
                     const { tx, ty, offset, lx, ly } = tileForChar(snapCx, snapCy);
-                    const t = ensureTile(tx, ty);
                     sendTyping(tx, ty, lx, ly);
+                    const t = ensureTile(tx, ty);
+                    
 
                     t.data = t.data.slice(0, offset) + e.key + t.data.slice(offset + 1);
                     setVersionTick(v => v + 1);
