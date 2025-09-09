@@ -179,7 +179,7 @@ Is this the full app?
 No — this repo is frontend only.
 
 What backend should I use?
-Any server that matches the REST + realtime contract above. A typical stack is .NET + SignalR, Node + ws, or Go + Gorilla/WebSocket, as long as it exposes the same shapes and events.
+Any server that matches the REST + realtime contract above. A typical stack is .NET + SignalR, Node + ws, or Go + Gorilla/WebSocket, as long as it exposes the same events and endpoints.
 
 Why canvas instead of HTML?
 Rendering thousands of characters as DOM nodes is slow. Canvas keeps layout/paint trivial, which is a big part of why 2w2t loads and scrolls much faster than classic YWOT UIs.
