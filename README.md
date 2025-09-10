@@ -1,6 +1,6 @@
 # 2w2t 
 
-A fast, minimalist clone of **Your World of Text (YWOT)** with a focus on instant chunk (canvas) rendering, smooth panning, and responsive real-time edits (a work in progress)
+A fast, minimalist infinite canvas with a focus on instant chunk (canvas) rendering, smooth panning, and responsive real-time edits (a work in progress)
 
 > **Note:** This repo contains **only the frontend**. To run it locally or deploy it, you’ll also need a compatible backend API + realtime hub (details below).
 
@@ -10,7 +10,7 @@ A fast, minimalist clone of **Your World of Text (YWOT)** with a focus on instan
   <img src="2w2t.png" alt="Example">
 </p>
 
-# Why it’s faster than YWOT (and other design choices)
+# Design
 
  ---> 2w2t was built to feel instant on load and snappy during edits. The main tricks:
 
@@ -170,7 +170,7 @@ const SAMPLE_MS = 180;
 - Set the correct environment variables for API base and hub URL.
 
 ## Credits
-Inspired by YWOT (Your World of Text).
+Inspired by YWOT.
 2w2t tries to be leaner and faster via canvas rendering (fast chunks, no loading menu), viewport-driven fetching, and optimistic/ordered updates. 
 
 ## Quick FAQ
