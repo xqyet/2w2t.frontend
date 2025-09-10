@@ -118,9 +118,7 @@ function App() {
     }
     function focusMobileInput() {
         // Focus only on coarse pointer/touch devices
-        const isTouch =
-            (window.matchMedia && window.matchMedia('(pointer: coarse)').matches) ||
-            'ontouchstart' in window || navigator.maxTouchPoints > 0;
+        const isTouch = window.matchMedia?.('(pointer: coarse)').matches ?? false;
 
         if (!isTouch) return;
 
@@ -715,7 +713,7 @@ function App() {
 
     useEffect(() => {
         function onPaste(e: ClipboardEvent) {
-            if (isMobileInputFocused()) return; 
+            if (isMobileInputFocused() && e.isTrusted) return; 
             if (!caret.current) return;
 
             const text = e.clipboardData?.getData('text') ?? '';
