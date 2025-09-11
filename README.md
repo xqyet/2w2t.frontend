@@ -1,4 +1,4 @@
-# 2w2t 
+# [2w2t](https://2w2t.org/)
 
 A fast, minimalist infinite canvas with a focus on instant chunk (canvas) rendering, smooth panning, and multiplayer responsive real-time edits 
 
