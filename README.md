@@ -1,6 +1,6 @@
 # 2w2t 
 
-A fast, minimalist infinite canvas with a focus on instant chunk (canvas) rendering, smooth panning, and responsive real-time edits (a work in progress)
+A fast, minimalist infinite canvas with a focus on instant chunk (canvas) rendering, smooth panning, and multiplayer responsive real-time edits 
 
 > **Note:** This repo contains **only the frontend**. To run it locally or deploy it, you’ll also need a compatible backend API + realtime hub (more details below).
 
