@@ -2,7 +2,7 @@
 
 A fast, minimalist infinite canvas with a focus on instant chunk (canvas) rendering, smooth panning, and responsive real-time edits (a work in progress)
 
-> **Note:** This repo contains **only the frontend**. To run it locally or deploy it, you’ll also need a compatible backend API + realtime hub (details below).
+> **Note:** This repo contains **only the frontend**. To run it locally or deploy it, you’ll also need a compatible backend API + realtime hub (more details below).
 
 ---
 
