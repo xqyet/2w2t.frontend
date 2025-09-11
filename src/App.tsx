@@ -4,6 +4,25 @@ import { fetchTiles, patchTile } from './api';
 import { getHub } from './signalr';
 import './App.css';
 
+declare global {
+    interface Window {
+        tw2tTeleport?: (opts: {
+            /** X in chosen units (default: "unit" = your HUD units) */
+            x: number;
+            /** Y in chosen units */
+            y: number;
+            /** "char" | "tile" | "unit" (default "unit") */
+            units?: 'char' | 'tile' | 'unit';
+            /** center camera on target (default true) */
+            center?: boolean;
+            /** also place the caret at target (default true) */
+            placeCaret?: boolean;
+            /** smooth pan duration in ms (0 = instant, default 500) */
+            animateMs?: number;
+        }) => Promise<void>;
+    }
+}
+
 type Camera = { x: number; y: number }; // world px
 
 // --- tuning knobs ---
@@ -13,6 +32,8 @@ const PAD_Y = 3;           // top/bottom padding inside a cell
 const DEFAULT_ZOOM_X = 0.95; // < 1.0 = slightly tighter horizontally
 const DEFAULT_ZOOM_Y = 0.94; // keep your slightly zoomed-in rows
 const FONT_FAMILY = '"Courier New", Courier, monospace';
+const TIGHTEN_Y = 4; // tighten vertical space for tiles 
+const TIGHTEN_X = 1.5; // tighten horixontal space for tiles 
 const VIEW_SCALE = 1.15;
 const mod = (n: number, m: number) => ((n % m) + m) % m;
 const FADE_MS = 140; // fast fade-in, ~YWO(T) feel
@@ -26,6 +47,7 @@ const COORD_UNIT = 10; // show 1 per 10 characters (10->1, 20->2, etc.)
 const DRAG_SENS = 0.9; // 1.0 = current feel, lower = less sensitive (e.g., 0.6–0.85)
 const FETCH_THROTTLE_MS = 80; // viewport fetch for page reload
 const PEER_TYPING_TTL_MS = 900; // how long the “black rect” stays visible
+const MAX_CHARS_ABS = 10_000_000_000_000; // teleport limit (world is infinite but you need a teleport limit to prevent database strain)
 
 
 // --- visual toggles ---
@@ -34,7 +56,7 @@ const SHOW_TILE_BORDERS = false;      // turn per-tile border boxes on/off
 const SHOW_MISSING_PLACEHOLDER = false; // show "…" for unloaded tiles
 
 // --- protected plaza around (0,0) in character coordinates ---
-const PROTECT = { x: -10, y: -10, w: 30, h: 13 };
+const PROTECT = { x: -10, y: -10, w: 35, h: 16 };
 
 // text/links to show inside the plaza (centered)
 const PLAZA_LINES: Array<{ text: string; link?: string; gap?: number }> = [
@@ -42,9 +64,9 @@ const PLAZA_LINES: Array<{ text: string; link?: string; gap?: number }> = [
     { text: '~2writers2tiles~', gap: 8 },// extra margin below the title (pixels)
     { text: 'An Infinite Void to\nwrite, create, and destroy', gap: 8 }, // newline after "Void to"
     { text: 'Chat with other users you find\nin the void!', gap:8 },
-    { text: 'How to Paste ASCII Art', link: 'https://github.com/xqyet/2w2t.ASCII', gap:10 },
-    { text: '~xqyet~', link: 'https://xqyet.dev/', gap:6 },
-    { text: '~~source code~~', link: 'https://github.com/xqyet/2w2t.frontend' },
+    { text: 'How to Paste ASCII Art', link: 'https://github.com/xqyet/2w2t.ASCII#ascii-script', gap:6 },
+    { text: 'How to Teleport', link: 'https://github.com/xqyet/2w2t.ASCII#teleport-script', gap:6 },
+    { text: 'source code', link: 'https://github.com/xqyet/2w2t.frontend' },
 
 ];
 
@@ -112,9 +134,8 @@ function App() {
         if (now - lastTypingSentAt.current < 60) return; // throttle ~16fps+
         lastTypingSentAt.current = now;
 
-        const hub = getHub();
         // best-effort (ignore if not started yet)
-        hub.invoke('Typing', tx, ty, lx, ly).catch(() => { });
+        hubSafeInvoke('Typing', tx, ty, lx, ly);
     }
     function focusMobileInput() {
         // Focus only on coarse pointer/touch devices
@@ -315,6 +336,14 @@ function App() {
         return moved;
     }
 
+    function hubSafeInvoke<T = unknown>(method: string, ...args: any[]): Promise<T | void> {
+        const hub = getHub();
+        // @ts-ignore — SignalR ConnectionState enum varies by version; string check is fine
+        if (hub.state !== 'Connected') return Promise.resolve();
+        return hub.invoke(method, ...args).catch(() => { });
+    }
+
+
     function markRecent(cx: number, cy: number) {
         recentWrites.current.set(`${cx},${cy}`, performance.now());
     }
@@ -344,10 +373,87 @@ function App() {
     function metrics(ctx: CanvasRenderingContext2D) {
         ctx.font = `${FONT_PX}px ${FONT_FAMILY}`;
         const charW = ctx.measureText('M').width; // monospace -> constant
-        const cellX = Math.round((charW + PAD_X * 2) * DEFAULT_ZOOM_X);
-        const cellY = Math.round((FONT_PX + PAD_Y * 2) * DEFAULT_ZOOM_Y);
+        const cellX = Math.round((charW + PAD_X * 2 - TIGHTEN_X) * DEFAULT_ZOOM_X);
+        const cellY = Math.round((FONT_PX + PAD_Y * 2 - TIGHTEN_Y) * DEFAULT_ZOOM_Y);
         return { cellX, cellY, charW };
     }
+
+    // Convert "unit"/"tile"/"char" to absolute character coordinates
+    function toCharCoords(
+        x: number,
+        y: number,
+        units: 'char' | 'tile' | 'unit'
+    ): { cx: number; cy: number } {
+        if (units === 'char') return { cx: Math.trunc(x), cy: Math.trunc(y) };
+        if (units === 'tile') return { cx: Math.trunc(x * TILE_W), cy: Math.trunc(y * TILE_H) };
+        // 'unit' (your HUD shows 1 per COORD_UNIT chars)
+        return { cx: Math.trunc(x * COORD_UNIT), cy: Math.trunc(y * COORD_UNIT) };
+    }
+
+    function clampChar(n: number) {
+        if (!Number.isFinite(n)) return 0;
+        const i = Math.trunc(n);
+        return Math.max(-MAX_CHARS_ABS, Math.min(MAX_CHARS_ABS, i));
+    }
+
+    // Center camera so that (cx,cy) ends up in the middle of the viewport.
+    function cameraTargetForChar(cx: number, cy: number) {
+        const cv = canvasRef.current!;
+        const ctx = cv.getContext('2d')!;
+        const { cellX, cellY } = metrics(ctx);
+
+        const worldW = (cv.clientWidth || window.innerWidth) / VIEW_SCALE;
+        const worldH = (cv.clientHeight || window.innerHeight) / VIEW_SCALE;
+
+        const targetWorldX = cx * cellX;
+        const targetWorldY = cy * cellY;
+
+        const camX = targetWorldX - worldW / 2;
+        const camY = targetWorldY - worldH / 2;
+        return { camX, camY };
+    }
+
+    function placeCaretAtChar(cx: number, cy: number) {
+        const { tx, ty } = tileForChar(cx, cy);
+        ensureTile(tx, ty);
+        caret.current = { cx, cy, anchorCx: cx };
+        setVersionTick(v => v + 1);
+    }
+
+    // Smoothly animate camera from current to target over animateMs
+    async function animateCameraTo(targetX: number, targetY: number, animateMs: number) {
+        const startX = cam.current.x;
+        const startY = cam.current.y;
+        const start = performance.now();
+        const dur = Math.max(0, animateMs);
+
+        return new Promise<void>(resolve => {
+            if (dur === 0) {
+                cam.current.x = targetX;
+                cam.current.y = targetY;
+                setVersionTick(v => v + 1);
+                resolve();
+                return;
+            }
+
+            function step(now: number) {
+                const t = Math.min(1, (now - start) / dur);
+                // ease-in-out cubic
+                const e = t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
+                cam.current.x = startX + (targetX - startX) * e;
+                cam.current.y = startY + (targetY - startY) * e;
+                setVersionTick(v => v + 1);
+
+                if (t < 1) {
+                    requestAnimationFrame(step);
+                } else {
+                    resolve();
+                }
+            }
+            requestAnimationFrame(step);
+        });
+    }
+
 
     // draw loop
     useEffect(() => {
@@ -509,7 +615,7 @@ function App() {
 
                                 if (isHighlighted) {
                                     ctx.fillStyle = '#000000';
-                                    ctx.fillRect(cellLeft + 1, cellTop + 1, cellX - 2, cellY - 2);
+                                    ctx.fillRect(cellLeft + 1, cellTop + 1, cellX - 0, cellY + 2);
                                 }
 
                                 // ? don’t draw any character that’s inside the protected box
@@ -549,7 +655,7 @@ function App() {
                                         // if (left + cellX < 0 || top + cellY < 0 || left > worldW || top > worldH) continue;
 
                                         ctx.fillStyle = '#000';
-                                        ctx.fillRect(left + 1, top + 1, cellX - 2, cellY - 2);
+                                        ctx.fillRect(left + 1, top + 1, cellX - 0, cellY + 2);
                                     }
                                 }
 
@@ -582,8 +688,8 @@ function App() {
                 // display in “coarse units”: 1 per COORD_UNIT characters
                 const dispX = Math.trunc(cxCenterExact / COORD_UNIT);
                 const dispY = Math.trunc(cyCenterExact / COORD_UNIT);
-
-                const hudText = `X:${dispX} Y:${dispY}`;
+                const fmt = new Intl.NumberFormat('en-US'); // adds 1,000 separators
+                const hudText = `X:${fmt.format(dispX)} Y:${fmt.format(dispY)}`;
 
                 ctx.save();
                 ctx.font = '18px "Courier New", Courier, monospace';
@@ -667,18 +773,17 @@ function App() {
         // join/leave groups
         const need = new Set<TileKey>();
         for (let y = minTileY; y <= maxTileY; y++) for (let x = minTileX; x <= maxTileX; x++) need.add(key(x, y));
-        const hub = getHub();
         for (const k of need) {
             if (!joined.current.has(k)) {
                 const [x, y] = k.split(':').map(Number);
-                await hub.invoke('JoinTile', x, y);
+                await hubSafeInvoke('JoinTile', x, y);
                 joined.current.add(k);
             }
         }
         for (const k of [...joined.current]) {
             if (!need.has(k)) {
                 const [x, y] = k.split(':').map(Number);
-                await hub.invoke('LeaveTile', x, y);
+                await hubSafeInvoke('LeaveTile', x, y);
                 joined.current.delete(k);
             }
         }
@@ -686,7 +791,65 @@ function App() {
         lastRect.current = { minX: minTileX, minY: minTileY, maxX: maxTileX, maxY: maxTileY };
     }
 
-   
+    useEffect(() => {
+        window.tw2tTeleport = async (opts) => {
+            const {
+                x,
+                y,
+                units = 'unit',
+                center = true,
+                placeCaret = true,
+                animateMs = 500
+            } = opts;
+
+            // convert ? clamp
+            let { cx, cy } = toCharCoords(x, y, units);
+            const rawCx = cx, rawCy = cy;
+            cx = clampChar(cx);
+            cy = clampChar(cy);
+            if (cx !== rawCx || cy !== rawCy) {
+                console.warn('[2w2t] Teleport clamped to safe bounds:', { cx, cy });
+            }
+
+            const wantCaret = placeCaret && !inProtected(cx, cy);
+
+            // compute camera target with your helper
+            const { camX: targetCamX, camY: targetCamY } = cameraTargetForChar(cx, cy);
+
+            // be nice to animation duration too
+            const ms = Math.max(0, Math.min(4000, Math.trunc(animateMs)));
+
+            if (center) {
+                await animateCameraTo(targetCamX, targetCamY, ms);
+            } else {
+                cam.current.x = targetCamX;
+                cam.current.y = targetCamY;
+                setVersionTick(v => v + 1);
+            }
+
+            // Fetch view; don't let a backend error crash teleport
+            try { await refreshViewport(); } catch (e) { console.warn('refreshViewport failed', e); }
+
+            if (wantCaret) {
+                placeCaretAtChar(cx, cy);
+                focusMobileInput();
+            }
+        };
+
+        return () => { delete window.tw2tTeleport; };
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, []);
+
+    useEffect(() => {
+        function onUR(e: PromiseRejectionEvent) {
+            const msg = String((e as any)?.reason?.message ?? '');
+            if (msg.includes("connection is not in the 'Connected' State")) {
+                e.preventDefault(); // suppress console noise for this benign case
+            }
+        }
+        window.addEventListener('unhandledrejection', onUR);
+        return () => window.removeEventListener('unhandledrejection', onUR);
+    }, []);
 
     // boot: hub + initial viewport
     useEffect(() => {
@@ -706,8 +869,8 @@ function App() {
             setVersionTick(v => v + 1); // trigger a frame so it appears quickly
         });
 
-        hub.start().then(refreshViewport);
-        return () => { hub.stop(); };
+        hub.start().then(refreshViewport).catch(() => { });
+        return () => { hub.stop().catch(() => { }); };
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, []);
 

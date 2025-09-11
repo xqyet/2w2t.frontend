@@ -3,6 +3,14 @@ import type { Tile } from './types';
 
 let inFlight: AbortController | null = null;
 
+function isAbort(err: unknown) {
+    return (
+        err instanceof DOMException && err.name === 'AbortError'
+    ) || (
+            typeof err === 'object' && err !== null && (err as any).name === 'AbortError'
+        ) || String((err as any)?.message ?? '').toLowerCase().includes('abort');
+}
+
 export async function fetchTiles(
     minX: number, maxX: number, minY: number, maxY: number
 ): Promise<Tile[]> {
@@ -13,16 +21,21 @@ export async function fetchTiles(
     const ac = new AbortController();
     inFlight = ac;
 
-    const r = await fetch(url, {
-        credentials: 'include',
-        cache: 'no-store',
-        signal: ac.signal
-    });
-    if (!r.ok) throw new Error(`GET tiles ${r.status}`);
-    const data = await r.json();
-    // clear the handle only if this is the latest
-    if (inFlight === ac) inFlight = null;
-    return data;
+    try {
+        const r = await fetch(url, {
+            credentials: 'include',
+            cache: 'no-store',
+            signal: ac.signal,
+        });
+        if (!r.ok) throw new Error(`GET tiles ${r.status}`);
+        return (await r.json()) as Tile[];
+    } catch (err) {
+        if (isAbort(err)) return []; // benign: user moved; ignore quietly
+        throw err;                   // real error -> let caller handle/log
+    } finally {
+        // clear the handle only if this is the latest controller
+        if (inFlight === ac) inFlight = null;
+    }
 }
 
 export async function patchTile(
@@ -31,7 +44,9 @@ export async function patchTile(
     const r = await fetch('/api/Tile/patch', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ x, y, offset, text, knownVersion })
+        credentials: 'include',
+        cache: 'no-store',
+        body: JSON.stringify({ x, y, offset, text, knownVersion }),
     });
     if (!r.ok) throw new Error(`PATCH ${r.status}`);
     return r.json() as Promise<{ version: number }>;
