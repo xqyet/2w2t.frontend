@@ -183,7 +183,7 @@ What backend should I use?
 Any server that matches the REST + realtime contract above. A typical stack is .NET + SignalR, Node + ws, or Go + Gorilla/WebSocket, as long as it exposes the same events and endpoints.
 
 Why canvas instead of HTML?
-Rendering thousands of characters as DOM nodes is slow. Canvas keeps layout/paint trivial, which is a big part of why 2w2t loads and scrolls much faster than classic YWOT UIs.
+Rendering thousands of characters as DOM nodes is slow. Canvas keeps layout/paint trivial, which is a big part of why 2w2t loads much faster than the classic YWOT UI.
 
 Where do I change the API URLs?
 Set .env (`VITE_API_BASE_URL`, `VITE_SIGNALR_URL`) and/or edit `api.ts` / `signalr.ts`.
