@@ -12,7 +12,8 @@ A fast, minimalist infinite canvas with a focus on instant chunk (canvas) render
 
 # Design
 
- ---> 2w2t was built to feel instant on load and snappy during edits. The main tricks:
+> [!NOTE]
+> **2w2t** was built to feel instant on chunk loading and snappy during edits. I've released easy to use scripts to paste into your console to interact with the world around you. These are just examples however, as I encourage users to modify and innovate their own ideas to interact with my infinite webpage.
 
 ### Canvas-only rendering
 No thousands of DOM nodes. Everything is drawn to a single `<canvas>`, which keeps layout/paint overhead tiny.
