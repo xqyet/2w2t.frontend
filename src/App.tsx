@@ -638,6 +638,10 @@ function App() {
 
                                 if (suppressed) continue;
 
+                                if (ch === ' ' && !isHighlighted) {
+                                    continue;
+                                }
+
                                 const keyRC = `${cxAbs},${cyAbs}`;
                                 let alpha = 1;
                                 const ts = recentWrites.current.get(keyRC);
