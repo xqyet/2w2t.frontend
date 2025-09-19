@@ -72,7 +72,6 @@ const inProtected = (cx: number, cy: number) =>
 
 function App() {
     const canvasRef = useRef<HTMLCanvasElement>(null);
-    const [versionTick, setVersionTick] = useState(0);
     const [dimBg, setDimBg] = useState<boolean>(
         (localStorage.getItem('2w2t-bg-dim') ?? '0') === '1'
     );
@@ -90,7 +89,6 @@ function App() {
     const lastTypingSentAt = useRef(0);
     const isMobileInputFocused = () =>
         document.activeElement === mobileInputRef.current;
-
     const linkAreas = useRef<{ x: number; y: number; w: number; h: number; url: string }[]>([]);
     const recentWrites = useRef<Map<string, number>>(new Map());
     const inputQueue = useRef<Promise<void>>(Promise.resolve());
@@ -100,24 +98,36 @@ function App() {
     const followCaret = useRef(false);
     const ZWS = '\u200B';
     const CLEAR_HEX = '000000';
+    const dimBgRef = useRef(dimBg);
+
+    useEffect(() => { dimBgRef.current = dimBg; }, [dimBg]);
+    const lastCursor = useRef<string>('default');
+    function setCanvasCursor(cur: string) {
+        const cv = canvasRef.current;
+        if (!cv) return;
+        if (lastCursor.current !== cur) {
+            cv.style.cursor = cur;
+            lastCursor.current = cur;
+        }
+    }
     function toHex6(input?: string): string | undefined {
+
         if (!input) return undefined;
         let s = input.trim();
-        // #rrggbb
+
         if (/^#?[0-9a-fA-F]{6}$/.test(s)) return s.replace('#', '').toLowerCase();
-        // #rgb
         if (/^#?[0-9a-fA-F]{3}$/.test(s)) {
             s = s.replace('#', '');
             return s.split('').map(c => c + c).join('').toLowerCase();
         }
-        // rgb(r,g,b)
+
         const m = s.match(/^rgb\(\s*([0-9]{1,3})\s*,\s*([0-9]{1,3})\s*,\s*([0-9]{1,3})\s*\)$/i);
         if (m) {
             const [r, g, b] = [m[1], m[2], m[3]].map(n => Math.max(0, Math.min(255, +n)));
             const h = (n: number) => n.toString(16).padStart(2, '0');
             return `${h(r)}${h(g)}${h(b)}`;
         }
-        return undefined; // (we can expand later if needed)
+        return undefined; 
     }
 
     function getServerColorAt(tile: Tile, offset: number): string | undefined {
@@ -128,7 +138,6 @@ function App() {
     }
 
     function setLocalColorAt(tile: Tile, offset: number, hex6: string) {
-        // ensure color string is the right size
         if (!tile.color || tile.color.length !== TILE_CHARS * 6) {
             tile.color = '0'.repeat(TILE_CHARS * 6);
         }
@@ -139,13 +148,12 @@ function App() {
         inputQueue.current = inputQueue.current.then(async () => { await fn(); });
         return inputQueue.current.catch(() => { }); 
     }
-    // Queue of in-flight network patches per tile key
+
     const pending = useRef<Map<TileKey, Promise<void>>>(new Map());
     function queuePatch(t: Tile, offset: number, ch: string, color?: string) {
         const k = key(t.x, t.y);
         const prev = pending.current.get(k) ?? Promise.resolve();
 
-        // optimistic local color (if provided)
         const hex6 = toHex6(color);
         if (hex6) setLocalColorAt(t, offset, hex6);
 
@@ -224,7 +232,6 @@ function App() {
                 const t = ensureTile(tx, ty);
 
                 t.data = t.data.slice(0, offset) + ' ' + t.data.slice(offset + 1);
-                setVersionTick(v => v + 1);
                 markRecent(snapCx, snapCy);
                 colorLayer.current.delete(`${snapCx},${snapCy}`);
                 queuePatch(t, offset, ' ', `#${CLEAR_HEX}`);
@@ -261,7 +268,6 @@ function App() {
 
                 const t = ensureTile(tx, ty);
                 t.data = t.data.slice(0, offset) + ' ' + t.data.slice(offset + 1);
-                setVersionTick(v => v + 1);
 
                 markRecent(snapCx, snapCy);
                 colorLayer.current.delete(`${snapCx},${snapCy}`);
@@ -291,14 +297,12 @@ function App() {
 
                     const t = ensureTile(tx, ty);
                     t.data = t.data.slice(0, offset) + ch + t.data.slice(offset + 1);
-                    setVersionTick(v => v + 1);
 
                     markRecent(snapCx, snapCy);
                     queuePatch(t, offset, ch);
 
                     if (caret.current) {
                         caret.current.cx = snapCx + 1;
-                        setVersionTick(v => v + 1);
                         followCaret.current = true;
                         if (ensureCaretEdgeFollow()) { refreshViewport(); }
                     }
@@ -403,10 +407,10 @@ function App() {
     // computing cell size from font metrics + padding (+ zoom)
     function metrics(ctx: CanvasRenderingContext2D) {
         ctx.font = `${FONT_PX}px ${FONT_FAMILY}`;
-        const charW = ctx.measureText('M').width; // monospace -> constant
+        const charW = ctx.measureText('M').width;
         const cellX = Math.round((charW + PAD_X * 2 - TIGHTEN_X) * DEFAULT_ZOOM_X);
         const cellY = Math.round((FONT_PX + PAD_Y * 2 - TIGHTEN_Y) * DEFAULT_ZOOM_Y);
-        return { cellX, cellY, charW };
+        return { cellX, cellY }; 
     }
 
     // Convert "unit"/"tile"/"char" to absolute character coordinates (will recalculate ui later)
@@ -446,7 +450,6 @@ function App() {
         const { tx, ty } = tileForChar(cx, cy);
         ensureTile(tx, ty);
         caret.current = { cx, cy, anchorCx: cx };
-        setVersionTick(v => v + 1);
     }
     async function animateCameraTo(targetX: number, targetY: number, animateMs: number) {
         const startX = cam.current.x;
@@ -458,7 +461,6 @@ function App() {
             if (dur === 0) {
                 cam.current.x = targetX;
                 cam.current.y = targetY;
-                setVersionTick(v => v + 1);
                 resolve();
                 return;
             }
@@ -468,7 +470,6 @@ function App() {
                 const e = t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
                 cam.current.x = startX + (targetX - startX) * e;
                 cam.current.y = startY + (targetY - startY) * e;
-                setVersionTick(v => v + 1);
 
                 if (t < 1) {
                     requestAnimationFrame(step);
@@ -488,22 +489,32 @@ function App() {
         let af = 0;
 
         function resize() {
-            cv.width = cv.clientWidth || window.innerWidth;
-            cv.height = cv.clientHeight || window.innerHeight;
+            // DPI-aware canvas backing store (crisper + predictable)
+            const dpr = window.devicePixelRatio || 1;
+            const cssW = cv.clientWidth || window.innerWidth;
+            const cssH = cv.clientHeight || window.innerHeight;
+            cv.width = Math.round(cssW * dpr);
+            cv.height = Math.round(cssH * dpr);
+            // reset transform so 1 unit == 1 CSS pixel
+            ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
         }
         resize();
         window.addEventListener('resize', resize);
 
         function draw() {
-            const { width, height } = cv;
+            const cssW = cv.clientWidth || window.innerWidth;
+            const cssH = cv.clientHeight || window.innerHeight;
+
+            // clear background in CSS pixels
+            ctx.fillStyle = dimBgRef.current ? '#cccccc' : '#fff';
+            ctx.fillRect(0, 0, cssW, cssH);
+            cv.style.backgroundColor = dimBgRef.current ? '#e9ecef' : '#fff';
+
             const now = performance.now();
-            const worldW = width / viewScale;
-            const worldH = height / viewScale;
+            const worldW = cssW / viewScale;
+            const worldH = cssH / viewScale;
 
-            ctx.fillStyle = dimBg ? '#cccccc' : '#fff';
-            ctx.fillRect(0, 0, width, height);
-            cv.style.backgroundColor = dimBg ? '#e9ecef' : '#fff';
-
+            // your existing metrics
             const { cellX, cellY } = metrics(ctx);
 
             ctx.save();
@@ -626,7 +637,6 @@ function App() {
                                 }
 
                                 if (suppressed) continue;
-                                if (suppressed) continue;
 
                                 const keyRC = `${cxAbs},${cyAbs}`;
                                 let alpha = 1;
@@ -704,8 +714,8 @@ function App() {
                 const padY = 8;
                 const boxW = textW + padX * 2;
                 const boxH = textH + padY * 2;
-                const bx = cv.width - boxW;
-                const by = cv.height - boxH;
+                const bx = cssW - boxW;
+                const by = cssH - boxH;
                 const r = 10;
                 function roundRect(x: number, y: number, w: number, h: number, rad: number) {
                     const rr = Math.min(rad, w / 2, h / 2);
@@ -738,7 +748,7 @@ function App() {
 
         af = requestAnimationFrame(draw);
         return () => { cancelAnimationFrame(af); window.removeEventListener('resize', resize); };
-    }, [versionTick, dimBg]);
+    }, []);
 
     // primary async to fetch tiles in view & maintain hub subscriptions
     async function refreshViewport() {
@@ -771,7 +781,6 @@ function App() {
                 joined.current.delete(k);
             }
         }
-        setVersionTick(v => v + 1);
         lastRect.current = { minX: minTileX, minY: minTileY, maxX: maxTileX, maxY: maxTileY };
     }
 
@@ -792,7 +801,6 @@ function App() {
             const absKey = `${snapCx},${snapCy}`;
             if (color) colorLayer.current.set(absKey, color);
 
-            setVersionTick(v => v + 1);
             markRecent(snapCx, snapCy);
 
             // send to server with color
@@ -837,7 +845,6 @@ function App() {
             } else {
                 cam.current.x = targetCamX;
                 cam.current.y = targetCamY;
-                setVersionTick(v => v + 1);
             }
 
             try { await refreshViewport(); } catch (e) { console.warn('refreshViewport failed', e); }
@@ -882,7 +889,6 @@ function App() {
             }
 
             t.version = msg.version;
-            setVersionTick(v => v + 1);
         });
 
 
@@ -890,7 +896,6 @@ function App() {
             const cx = msg.x * TILE_W + msg.col;
             const cy = msg.y * TILE_H + msg.row;
             peerCarets.current.set(msg.sender, { cx, cy, ts: performance.now() });
-            setVersionTick(v => v + 1); 
         });
 
         hub.start().then(refreshViewport).catch(() => { });
@@ -959,7 +964,6 @@ function App() {
 
             // optimistic local write
             t.data = t.data.slice(0, offset) + ch + t.data.slice(offset + 1);
-            setVersionTick(v => v + 1);
             markRecent(caret.current.cx, caret.current.cy);
             queuePatch(t, offset, ch, fgColor);
 
@@ -1015,12 +1019,9 @@ function App() {
             screenWorldY >= a.y && screenWorldY <= a.y + a.h
         );
 
-        cv.style.cursor = dragging.current
-            ? 'move'
-            : (overLink ? 'pointer' : 'default');
+        setCanvasCursor(dragging.current ? 'move' : (overLink ? 'pointer' : 'default'));
 
-        {
-            const cv = e.currentTarget;
+        if (!dragging.current) {
             const ctx = cv.getContext('2d')!;
             const { cellX, cellY } = metrics(ctx);
 
@@ -1037,6 +1038,7 @@ function App() {
 
             hoverCell.current = { cx: tx * TILE_W + lx, cy: ty * TILE_H + ly };
         }
+
 
         if (!dragging.current) return;
 
@@ -1275,7 +1277,6 @@ function App() {
         caret.current = { cx, cy, anchorCx: cx };
 
         focusMobileInput();
-        setVersionTick(v => v + 1);
     }
 
 
@@ -1288,16 +1289,6 @@ function App() {
         const screenWorldY = (e.clientY - rect.top) / viewScale;
         const worldX = screenWorldX + cam.current.x;
         const worldY = screenWorldY + cam.current.y;
-
-        for (const a of linkAreas.current) {
-            if (
-                screenWorldX >= a.x && screenWorldX <= a.x + a.w &&
-                screenWorldY >= a.y && screenWorldY <= a.y + a.h
-            ) {
-                window.open(a.url, '_blank', 'noopener,noreferrer');
-                return; 
-            }
-        }
 
         const tilePxW = TILE_W * cellX, tilePxH = TILE_H * cellY;
         const tx = Math.floor(worldX / tilePxW);
@@ -1327,7 +1318,6 @@ function App() {
         ensureTile(tx, ty);
         caret.current = { cx, cy, anchorCx: cx }; 
         focusMobileInput();
-        setVersionTick(v => v + 1);
     }
 
     useEffect(() => {
@@ -1371,14 +1361,12 @@ function App() {
 
                 writeRich().catch(() => { /* ignore */ });
                 markRecent(src.cx, src.cy);
-                setVersionTick(v => v + 1);
 
                 if (isCut) {
                     const { tx, ty, offset } = tileForChar(src.cx, src.cy);
                     const t = ensureTile(tx, ty);
                     t.data = t.data.slice(0, offset) + ' ' + t.data.slice(offset + 1);
                     colorLayer.current.delete(`${src.cx},${src.cy}`);
-                    setVersionTick(v => v + 1);
                     queuePatch(t, offset, ' ', `#${CLEAR_HEX}`); // clear color on server
                 }
 
@@ -1403,29 +1391,28 @@ function App() {
             if (e.key === 'Enter') {
                 caret.current.cy += 1;
                 caret.current.cx = caret.current.anchorCx;
-                setVersionTick(v => v + 1);
                 followCaret.current = true;
                 if (followCaret.current && ensureCaretEdgeFollow()) { refreshViewport(); }
                 return;
             }
 
             if (e.key === 'ArrowLeft') {
-                caret.current.cx -= 1; setVersionTick(v => v + 1); followCaret.current = true; if (followCaret.current && ensureCaretEdgeFollow()) { refreshViewport(); }
+                caret.current.cx -= 1; followCaret.current = true; if (followCaret.current && ensureCaretEdgeFollow()) { refreshViewport(); }
 
                 return;
             }
             if (e.key === 'ArrowRight') {
-                caret.current.cx += 1; setVersionTick(v => v + 1); followCaret.current = true; if (followCaret.current && ensureCaretEdgeFollow()) { refreshViewport(); }
+                caret.current.cx += 1; followCaret.current = true; if (followCaret.current && ensureCaretEdgeFollow()) { refreshViewport(); }
 
                 return;
             }
             if (e.key === 'ArrowUp') {
-                caret.current.cy -= 1; setVersionTick(v => v + 1); followCaret.current = true; if (followCaret.current && ensureCaretEdgeFollow()) { refreshViewport(); }
+                caret.current.cy -= 1; followCaret.current = true; if (followCaret.current && ensureCaretEdgeFollow()) { refreshViewport(); }
 
                 return;
             }
             if (e.key === 'ArrowDown') {
-                caret.current.cy += 1; setVersionTick(v => v + 1); followCaret.current = true; if (followCaret.current && ensureCaretEdgeFollow()) { refreshViewport(); }
+                caret.current.cy += 1; followCaret.current = true; if (followCaret.current && ensureCaretEdgeFollow()) { refreshViewport(); }
 
                 return;
             }
@@ -1444,7 +1431,6 @@ function App() {
                     const t = ensureTile(tx, ty);
 
                     t.data = t.data.slice(0, offset) + ' ' + t.data.slice(offset + 1);
-                    setVersionTick(v => v + 1);
                     followCaret.current = true;
                     if (followCaret.current && ensureCaretEdgeFollow()) { refreshViewport(); }
 
@@ -1469,7 +1455,6 @@ function App() {
 
                     // local write
                     t.data = t.data.slice(0, offset) + e.key + t.data.slice(offset + 1);
-                    setVersionTick(v => v + 1);
 
                     markRecent(snapCx, snapCy);
 
@@ -1478,7 +1463,6 @@ function App() {
 
                     if (caret.current) {
                         caret.current.cx = snapCx + 1;
-                        setVersionTick(v => v + 1);
                         followCaret.current = true;
                         if (ensureCaretEdgeFollow()) { refreshViewport(); }
                     }
@@ -1506,7 +1490,6 @@ function App() {
                         setDimBg(p => {
                             const next = !p;
                             localStorage.setItem('2w2t-bg-dim', next ? '1' : '0');
-                            setVersionTick(v => v + 1);
                             return next;
                         });
                     }}
