@@ -1,8 +1,8 @@
-# 2w2t 
+# [2w2t](https://2w2t.org/)
 
-A fast, minimalist infinite canvas with a focus on instant chunk (canvas) rendering, smooth panning, and responsive real-time edits (a work in progress)
+A fast, minimalist infinite canvas with a focus on instant chunk (canvas) rendering, smooth panning, and multiplayer responsive real-time edits 
 
-> **Note:** This repo contains **only the frontend**. To run it locally or deploy it, you’ll also need a compatible backend API + realtime hub (details below).
+> **Note:** This repo contains **only the frontend**. To run it locally or deploy it, you’ll also need a compatible backend API + realtime hub (more details below).
 
 ---
 
@@ -12,7 +12,8 @@ A fast, minimalist infinite canvas with a focus on instant chunk (canvas) render
 
 # Design
 
- ---> 2w2t was built to feel instant on load and snappy during edits. The main tricks:
+> [!NOTE]
+> **2w2t** was built to feel instant on chunk loading and snappy during edits. I've released easy to use scripts to paste into your console to interact with the world around you. These are just examples however, as I encourage users to modify and innovate their own ideas to interact with my infinite webpage.
 
 ### Canvas-only rendering
 No thousands of DOM nodes. Everything is drawn to a single `<canvas>`, which keeps layout/paint overhead tiny.
@@ -182,7 +183,7 @@ What backend should I use?
 Any server that matches the REST + realtime contract above. A typical stack is .NET + SignalR, Node + ws, or Go + Gorilla/WebSocket, as long as it exposes the same events and endpoints.
 
 Why canvas instead of HTML?
-Rendering thousands of characters as DOM nodes is slow. Canvas keeps layout/paint trivial, which is a big part of why 2w2t loads and scrolls much faster than classic YWOT UIs.
+Rendering thousands of characters as DOM nodes is slow. Canvas keeps layout/paint trivial, which is a big part of why 2w2t loads much faster than the classic YWOT UI.
 
 Where do I change the API URLs?
 Set .env (`VITE_API_BASE_URL`, `VITE_SIGNALR_URL`) and/or edit `api.ts` / `signalr.ts`.
