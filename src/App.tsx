@@ -1148,6 +1148,18 @@ function App() {
         }
     }
 
+    function getColorAt(cx: number, cy: number): string | undefined {
+        const overlay = colorLayer.current.get(`${cx},${cy}`);
+        if (overlay) return overlay; // transient/local color
+        const { tx, ty, offset } = tileForChar(cx, cy);
+        const t = tiles.current.get(key(tx, ty));
+        if (!t) return undefined;
+        return getServerColorAt(t, offset); // '#rrggbb' | undefined
+    }
+    const escapeHtml = (s: string) =>
+        s.replace(/[&<>"']/g, m => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[m]!));
+
+
     function onTouchEnd(e: React.TouchEvent<HTMLCanvasElement>) {
         e.preventDefault();
 
@@ -1325,10 +1337,34 @@ function App() {
             const isCut = (e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'x';
             if (isCopy || isCut) {
                 const src = caret.current ?? hoverCell.current;
-                if (!src) return;
-                if (inProtected(src.cx, src.cy)) { e.preventDefault(); return; }
+                if (!src || inProtected(src.cx, src.cy)) { e.preventDefault(); return; }
+
                 const ch = getCharAt(src.cx, src.cy) || ' ';
-                navigator.clipboard?.writeText(ch).catch(() => { });
+                const color = getColorAt(src.cx, src.cy); // '#rrggbb' | undefined
+                const html = color
+                    ? `<span style="color:${color}">${escapeHtml(ch)}</span>`
+                    : escapeHtml(ch);
+
+                const writeRich = async () => {
+                    if (navigator.clipboard?.write && (window as any).ClipboardItem) {
+                        await navigator.clipboard.write([
+                            new ClipboardItem({
+                                'text/html': new Blob([html], { type: 'text/html' }),
+                                'text/plain': new Blob([ch], { type: 'text/plain' }),
+                            })
+                        ]);
+                    } else {
+                        // Fallback path
+                        document.addEventListener('copy', ev => {
+                            ev.clipboardData!.setData('text/plain', ch);
+                            ev.clipboardData!.setData('text/html', html);
+                            ev.preventDefault();
+                        }, { once: true });
+                        document.execCommand('copy');
+                    }
+                };
+
+                writeRich().catch(() => { /* ignore */ });
                 markRecent(src.cx, src.cy);
                 setVersionTick(v => v + 1);
 
@@ -1336,14 +1372,15 @@ function App() {
                     const { tx, ty, offset } = tileForChar(src.cx, src.cy);
                     const t = ensureTile(tx, ty);
                     t.data = t.data.slice(0, offset) + ' ' + t.data.slice(offset + 1);
-                    setVersionTick(v => v + 1);
                     colorLayer.current.delete(`${src.cx},${src.cy}`);
-                    queuePatch(t, offset, ' ', `#${CLEAR_HEX}`);
+                    setVersionTick(v => v + 1);
+                    queuePatch(t, offset, ' ', `#${CLEAR_HEX}`); // clear color on server
                 }
 
                 e.preventDefault();
                 return;
             }
+
 
             if (e.altKey || e.ctrlKey || e.metaKey) return;
             if (
