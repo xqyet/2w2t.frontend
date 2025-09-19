@@ -9,6 +9,9 @@ A fast, minimalist infinite canvas with a focus on instant chunk (canvas) render
 <p align="center">
   <img src="2w2t.png" alt="Example">
 </p>
+<p align="center">
+  <img src="spawn.png" alt="Example">
+</p>
 
 # Design
 
