@@ -72,6 +72,9 @@ const inProtected = (cx: number, cy: number) =>
 function App() {
     const canvasRef = useRef<HTMLCanvasElement>(null);
     const [versionTick, setVersionTick] = useState(0);
+    const [dimBg, setDimBg] = useState<boolean>(
+        (localStorage.getItem('2w2t-bg-dim') ?? '0') === '1'
+    );
     const cam = useRef<Camera>({ x: 0, y: 0 });
     const dragging = useRef<null | { startMouseX: number; startMouseY: number; startCamX: number; startCamY: number }>(null);
     const caret = useRef<{ cx: number; cy: number; anchorCx: number } | null>(null);
@@ -496,8 +499,9 @@ function App() {
             const worldW = width / VIEW_SCALE;
             const worldH = height / VIEW_SCALE;
 
-            ctx.fillStyle = '#fff';
+            ctx.fillStyle = dimBg ? '#cccccc' : '#fff';
             ctx.fillRect(0, 0, width, height);
+            cv.style.backgroundColor = dimBg ? '#e9ecef' : '#fff';
 
             const { cellX, cellY } = metrics(ctx);
 
@@ -733,7 +737,7 @@ function App() {
 
         af = requestAnimationFrame(draw);
         return () => { cancelAnimationFrame(af); window.removeEventListener('resize', resize); };
-    }, [versionTick]);
+    }, [versionTick, dimBg]);
 
     // primary async to fetch tiles in view & maintain hub subscriptions
     async function refreshViewport() {
@@ -1489,8 +1493,23 @@ function App() {
     return (
         <>
             <div className="toolbar">
-                {" "} 
-                <img src="https://cdn.discordapp.com/emojis/889434608037421066.png?v=1" alt="stars5" height="24" />
+                {" "}
+                <img
+                    src={dimBg ? '/dark.png' : '/light.png'}
+                    alt={dimBg ? 'Dark mode icon' : 'Light mode icon'}
+                    width={36}
+                    height={36}              // was 24
+                    style={{ cursor: 'pointer' }}
+                    title={dimBg ? 'Switch to light' : 'Switch to dim'}
+                    onClick={() => {
+                        setDimBg(p => {
+                            const next = !p;
+                            localStorage.setItem('2w2t-bg-dim', next ? '1' : '0');
+                            setVersionTick(v => v + 1);
+                            return next;
+                        });
+                    }}
+                />
             </div>
 
             <canvas
