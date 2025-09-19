@@ -29,7 +29,7 @@ const FONT_FAMILY = '"Courier New", Courier, monospace';
 const TIGHTEN_Y = 4; // vertical space for tiles 
 const TIGHTEN_X = 1.5; // horixontal space for tiles 
 const isTouch = window.matchMedia?.('(pointer: coarse)').matches ?? false;
-const viewScale = isTouch ? 1.06 : 1.12; // users camera view scale
+const viewScale = isTouch ? .80 : 1.12; // users camera view scale
 const mod = (n: number, m: number) => ((n % m) + m) % m;
 const FADE_MS = 145; // fade
 const SAMPLE_MS = 180;     // fling velocity
@@ -1289,40 +1289,46 @@ function App() {
         const ctx = cv.getContext('2d')!;
         const { cellX, cellY } = metrics(ctx);
         const rect = cv.getBoundingClientRect();
+
+        // coords in the same (pre-scale, screen-space) system used for linkAreas
         const screenWorldX = (e.clientX - rect.left) / viewScale;
         const screenWorldY = (e.clientY - rect.top) / viewScale;
+
+        // ? link hit-test must use screenWorldX/Y (NOT worldX/Y)
+        for (const a of linkAreas.current) {
+            if (
+                screenWorldX >= a.x && screenWorldX <= a.x + a.w &&
+                screenWorldY >= a.y && screenWorldY <= a.y + a.h
+            ) {
+                window.open(a.url, '_blank', 'noopener,noreferrer');
+                return;
+            }
+        }
+
+        // From here down, convert to world space for caret placement
         const worldX = screenWorldX + cam.current.x;
         const worldY = screenWorldY + cam.current.y;
 
         const tilePxW = TILE_W * cellX, tilePxH = TILE_H * cellY;
         const tx = Math.floor(worldX / tilePxW);
         const ty = Math.floor(worldY / tilePxH);
-        const rx = mod(worldX, tilePxW);  
-        const ry = mod(worldY, tilePxH);  
+        const rx = mod(worldX, tilePxW);
+        const ry = mod(worldY, tilePxH);
         const lx = Math.floor(rx / cellX);
         const ly = Math.floor(ry / cellY);
 
         const cx = tx * TILE_W + lx;
         const cy = ty * TILE_H + ly;
 
-        for (const a of linkAreas.current) {
-            if (worldX >= a.x && worldX <= a.x + a.w &&
-                worldY >= a.y && worldY <= a.y + a.h) {
-                window.open(a.url, '_blank', 'noopener,noreferrer');
-                return; 
-            }
-        }
-
         const clickedCx = Math.floor(worldX / cellX);
         const clickedCy = Math.floor(worldY / cellY);
-        if (inProtected(clickedCx, clickedCy)) {
-            return;
-        }
+        if (inProtected(clickedCx, clickedCy)) return;
 
         ensureTile(tx, ty);
-        caret.current = { cx, cy, anchorCx: cx }; 
+        caret.current = { cx, cy, anchorCx: cx };
         focusMobileInput();
     }
+
 
     useEffect(() => {
         function onKey(e: KeyboardEvent) {
