@@ -28,7 +28,8 @@ const DEFAULT_ZOOM_Y = 0.94; // keep your slightly zoomed-in rows
 const FONT_FAMILY = '"Courier New", Courier, monospace';
 const TIGHTEN_Y = 4; // vertical space for tiles 
 const TIGHTEN_X = 1.5; // horixontal space for tiles 
-const VIEW_SCALE = 1.18; // users camera view scale
+const isTouch = window.matchMedia?.('(pointer: coarse)').matches ?? false;
+const viewScale = isTouch ? 1.06 : 1.12; // users camera view scale
 const mod = (n: number, m: number) => ((n % m) + m) % m;
 const FADE_MS = 145; // fade
 const SAMPLE_MS = 180;     // fling velocity
@@ -186,8 +187,8 @@ function App() {
     function currentTileRect(ctx: CanvasRenderingContext2D) {
         const { cellX, cellY } = metrics(ctx);
         const cv = canvasRef.current!;
-        const worldW = (cv.clientWidth || window.innerWidth) / VIEW_SCALE;
-        const worldH = (cv.clientHeight || window.innerHeight) / VIEW_SCALE;
+        const worldW = (cv.clientWidth || window.innerWidth) / viewScale;
+        const worldH = (cv.clientHeight || window.innerHeight) / viewScale;
         const tilePxW = TILE_W * cellX, tilePxH = TILE_H * cellY;
 
         const minTileX = Math.floor(cam.current.x / tilePxW) - 2;
@@ -319,8 +320,8 @@ function App() {
         const cv = canvasRef.current!;
         const ctx = cv.getContext('2d')!;
         const { cellX, cellY } = metrics(ctx);
-        const worldW = (cv.clientWidth || window.innerWidth) / VIEW_SCALE;
-        const worldH = (cv.clientHeight || window.innerHeight) / VIEW_SCALE;
+        const worldW = (cv.clientWidth || window.innerWidth) / viewScale;
+        const worldH = (cv.clientHeight || window.innerHeight) / viewScale;
         const cX = caret.current.cx * cellX;
         const cY = caret.current.cy * cellY;
         const left = cam.current.x;
@@ -430,8 +431,8 @@ function App() {
         const ctx = cv.getContext('2d')!;
         const { cellX, cellY } = metrics(ctx);
 
-        const worldW = (cv.clientWidth || window.innerWidth) / VIEW_SCALE;
-        const worldH = (cv.clientHeight || window.innerHeight) / VIEW_SCALE;
+        const worldW = (cv.clientWidth || window.innerWidth) / viewScale;
+        const worldH = (cv.clientHeight || window.innerHeight) / viewScale;
 
         const targetWorldX = cx * cellX;
         const targetWorldY = cy * cellY;
@@ -496,8 +497,8 @@ function App() {
         function draw() {
             const { width, height } = cv;
             const now = performance.now();
-            const worldW = width / VIEW_SCALE;
-            const worldH = height / VIEW_SCALE;
+            const worldW = width / viewScale;
+            const worldH = height / viewScale;
 
             ctx.fillStyle = dimBg ? '#cccccc' : '#fff';
             ctx.fillRect(0, 0, width, height);
@@ -506,7 +507,7 @@ function App() {
             const { cellX, cellY } = metrics(ctx);
 
             ctx.save();
-            ctx.scale(VIEW_SCALE, VIEW_SCALE);
+            ctx.scale(viewScale, viewScale);
 
             // --- protected plaza at (0,0) --- //
             linkAreas.current = []; 
@@ -744,8 +745,8 @@ function App() {
         const cv = canvasRef.current!;
         const ctx = cv.getContext('2d')!;
         const { cellX, cellY } = metrics(ctx);
-        const worldW = (cv.clientWidth || window.innerWidth) / VIEW_SCALE;
-        const worldH = (cv.clientHeight || window.innerHeight) / VIEW_SCALE;
+        const worldW = (cv.clientWidth || window.innerWidth) / viewScale;
+        const worldH = (cv.clientHeight || window.innerHeight) / viewScale;
         const tilePxW = TILE_W * cellX, tilePxH = TILE_H * cellY;
         const minTileX = Math.floor(cam.current.x / tilePxW) - 2;
         const minTileY = Math.floor(cam.current.y / tilePxH) - 2;
@@ -982,8 +983,8 @@ function App() {
         const cv = canvasRef.current;
         if (!cv) return;
 
-        const worldW = (cv.clientWidth || window.innerWidth) / VIEW_SCALE;
-        const worldH = (cv.clientHeight || window.innerHeight) / VIEW_SCALE;
+        const worldW = (cv.clientWidth || window.innerWidth) / viewScale;
+        const worldH = (cv.clientHeight || window.innerHeight) / viewScale;
 
         cam.current.x = -worldW / 2;
         cam.current.y = -worldH / 2;
@@ -1006,8 +1007,8 @@ function App() {
     function onMouseMove(e: React.MouseEvent<HTMLCanvasElement>) {
         const cv = e.currentTarget;
         const rect = cv.getBoundingClientRect();
-        const screenWorldX = (e.clientX - rect.left) / VIEW_SCALE;
-        const screenWorldY = (e.clientY - rect.top) / VIEW_SCALE;
+        const screenWorldX = (e.clientX - rect.left) / viewScale;
+        const screenWorldY = (e.clientY - rect.top) / viewScale;
 
         const overLink = linkAreas.current.some(a =>
             screenWorldX >= a.x && screenWorldX <= a.x + a.w &&
@@ -1039,8 +1040,8 @@ function App() {
 
         if (!dragging.current) return;
 
-        const rawDx = (e.clientX - dragging.current.startMouseX) / VIEW_SCALE;
-        const rawDy = (e.clientY - dragging.current.startMouseY) / VIEW_SCALE;
+        const rawDx = (e.clientX - dragging.current.startMouseX) / viewScale;
+        const rawDy = (e.clientY - dragging.current.startMouseY) / viewScale;
 
         const dx = rawDx * DRAG_SENS;
         const dy = rawDy * DRAG_SENS;
@@ -1087,8 +1088,8 @@ function App() {
             }
 
             const dt = Math.max(16, end.t - buf[0].t);
-            const vx = (((end.x - buf[0].x) / dt) / VIEW_SCALE) * FLING_SCALE;
-            const vy = (((end.y - buf[0].y) / dt) / VIEW_SCALE) * FLING_SCALE;
+            const vx = (((end.x - buf[0].x) / dt) / viewScale) * FLING_SCALE;
+            const vy = (((end.y - buf[0].y) / dt) / viewScale) * FLING_SCALE;
 
             const speed2 = vx * vx + vy * vy;
             if (speed2 > 0.000001) {
@@ -1128,8 +1129,8 @@ function App() {
 
         const t = firstTouch(e.nativeEvent);
         lastTouch.current = { x: t.clientX, y: t.clientY };
-        const rawDx = (t.clientX - dragging.current.startMouseX) / VIEW_SCALE;
-        const rawDy = (t.clientY - dragging.current.startMouseY) / VIEW_SCALE;
+        const rawDx = (t.clientX - dragging.current.startMouseX) / viewScale;
+        const rawDy = (t.clientY - dragging.current.startMouseY) / viewScale;
         const dx = rawDx * DRAG_SENS;
         const dy = rawDy * DRAG_SENS;
 
@@ -1240,8 +1241,8 @@ function App() {
         const { cellX, cellY } = metrics(ctx);
 
         const rect = cv.getBoundingClientRect();
-        const screenWorldX = (clientX - rect.left) / VIEW_SCALE;
-        const screenWorldY = (clientY - rect.top) / VIEW_SCALE;
+        const screenWorldX = (clientX - rect.left) / viewScale;
+        const screenWorldY = (clientY - rect.top) / viewScale;
 
         for (const a of linkAreas.current) {
             if (
@@ -1283,8 +1284,8 @@ function App() {
         const ctx = cv.getContext('2d')!;
         const { cellX, cellY } = metrics(ctx);
         const rect = cv.getBoundingClientRect();
-        const screenWorldX = (e.clientX - rect.left) / VIEW_SCALE;
-        const screenWorldY = (e.clientY - rect.top) / VIEW_SCALE;
+        const screenWorldX = (e.clientX - rect.left) / viewScale;
+        const screenWorldY = (e.clientY - rect.top) / viewScale;
         const worldX = screenWorldX + cam.current.x;
         const worldY = screenWorldY + cam.current.y;
 
