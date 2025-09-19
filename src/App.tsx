@@ -1016,7 +1016,7 @@ function App() {
         );
 
         cv.style.cursor = dragging.current
-            ? 'grabbing'
+            ? 'move'
             : (overLink ? 'pointer' : 'default');
 
         {
@@ -1515,7 +1515,7 @@ function App() {
 
             <canvas
                 ref={canvasRef}
-                style={{ touchAction: 'none' }}
+                style={{ touchAction: 'none', cursor: 'move' }}
                 onMouseDown={onMouseDown}
                 onMouseMove={onMouseMove}
                 onMouseUp={onMouseUp}
