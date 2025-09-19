@@ -90,25 +90,65 @@ function App() {
     const linkAreas = useRef<{ x: number; y: number; w: number; h: number; url: string }[]>([]);
     const recentWrites = useRef<Map<string, number>>(new Map());
     const inputQueue = useRef<Promise<void>>(Promise.resolve());
+    const colorLayer = useRef<Map<string, string>>(new Map());
     const tapStart = useRef<{ x: number; y: number; t: number } | null>(null);
     const lastTouch = useRef<{ x: number; y: number } | null>(null);
     const followCaret = useRef(false);
     const ZWS = '\u200B';
+    const CLEAR_HEX = '000000';
+    function toHex6(input?: string): string | undefined {
+        if (!input) return undefined;
+        let s = input.trim();
+        // #rrggbb
+        if (/^#?[0-9a-fA-F]{6}$/.test(s)) return s.replace('#', '').toLowerCase();
+        // #rgb
+        if (/^#?[0-9a-fA-F]{3}$/.test(s)) {
+            s = s.replace('#', '');
+            return s.split('').map(c => c + c).join('').toLowerCase();
+        }
+        // rgb(r,g,b)
+        const m = s.match(/^rgb\(\s*([0-9]{1,3})\s*,\s*([0-9]{1,3})\s*,\s*([0-9]{1,3})\s*\)$/i);
+        if (m) {
+            const [r, g, b] = [m[1], m[2], m[3]].map(n => Math.max(0, Math.min(255, +n)));
+            const h = (n: number) => n.toString(16).padStart(2, '0');
+            return `${h(r)}${h(g)}${h(b)}`;
+        }
+        return undefined; // (we can expand later if needed)
+    }
+
+    function getServerColorAt(tile: Tile, offset: number): string | undefined {
+        if (!tile.color || tile.color.length !== TILE_CHARS * 6) return undefined;
+        const hex = tile.color.slice(offset * 6, offset * 6 + 6);
+        if (!hex || /^0{6}$/.test(hex)) return undefined; // "unset"
+        return `#${hex}`;
+    }
+
+    function setLocalColorAt(tile: Tile, offset: number, hex6: string) {
+        // ensure color string is the right size
+        if (!tile.color || tile.color.length !== TILE_CHARS * 6) {
+            tile.color = '0'.repeat(TILE_CHARS * 6);
+        }
+        const start = offset * 6;
+        tile.color = tile.color.slice(0, start) + hex6 + tile.color.slice(start + 6);
+    }
     function enqueueEdit(fn: () => Promise<void> | void) {
         inputQueue.current = inputQueue.current.then(async () => { await fn(); });
         return inputQueue.current.catch(() => { }); 
     }
     // Queue of in-flight network patches per tile key
     const pending = useRef<Map<TileKey, Promise<void>>>(new Map());
-    function queuePatch(t: Tile, offset: number, ch: string) {
+    function queuePatch(t: Tile, offset: number, ch: string, color?: string) {
         const k = key(t.x, t.y);
         const prev = pending.current.get(k) ?? Promise.resolve();
 
-        // Chain the next patch after the previous finishes
+        // optimistic local color (if provided)
+        const hex6 = toHex6(color);
+        if (hex6) setLocalColorAt(t, offset, hex6);
+
         const run = prev
             .then(async () => {
-                const res = await patchTile(t.x, t.y, offset, ch, t.version);
-                t.version = res.version; 
+                const res = await patchTile(t.x, t.y, offset, ch, t.version, hex6);
+                t.version = res.version;
             })
             .catch(async () => {
                 const [ref] = await fetchTiles(t.x, t.x, t.y, t.y);
@@ -182,7 +222,8 @@ function App() {
                 t.data = t.data.slice(0, offset) + ' ' + t.data.slice(offset + 1);
                 setVersionTick(v => v + 1);
                 markRecent(snapCx, snapCy);
-                queuePatch(t, offset, ' ');
+                colorLayer.current.delete(`${snapCx},${snapCy}`);
+                queuePatch(t, offset, ' ', `#${CLEAR_HEX}`);
                 followCaret.current = true;
                 if (ensureCaretEdgeFollow()) { refreshViewport(); }
             });
@@ -219,7 +260,8 @@ function App() {
                 setVersionTick(v => v + 1);
 
                 markRecent(snapCx, snapCy);
-                queuePatch(t, offset, ' ');
+                colorLayer.current.delete(`${snapCx},${snapCy}`);
+                queuePatch(t, offset, ' ', `#${CLEAR_HEX}`); 
 
                 followCaret.current = true;
                 if (ensureCaretEdgeFollow()) { refreshViewport(); }
@@ -339,7 +381,14 @@ function App() {
     function ensureTile(tx: number, ty: number) {
         const k = key(tx, ty);
         if (!tiles.current.has(k)) {
-            tiles.current.set(k, { id: 0, x: tx, y: ty, data: ' '.repeat(TILE_CHARS), version: 0 });
+            tiles.current.set(k, {
+                id: 0,
+                x: tx,
+                y: ty,
+                data: ' '.repeat(TILE_CHARS),
+                color: '0'.repeat(TILE_CHARS * 6), // NEW
+                version: 0
+            });
         }
         return tiles.current.get(k)!;
     }
@@ -585,7 +634,13 @@ function App() {
 
                                 ctx.save();
                                 ctx.globalAlpha = alpha;
-                                ctx.fillStyle = isHighlighted ? '#fff' : '#000';
+                                const cellKey = keyRC; // `${cxAbs},${cyAbs}`
+                                const idx = row * TILE_W + col;
+                                const fgServer = getServerColorAt(tile, idx);
+                                const fg = isHighlighted
+                                    ? '#fff'
+                                    : (colorLayer.current.get(cellKey) ?? fgServer ?? '#000');
+                                ctx.fillStyle = fg;
                                 ctx.fillText(ch, cellLeft + PAD_X, cellTop + PAD_Y);
 
                                 {
@@ -693,7 +748,6 @@ function App() {
         const maxTileX = Math.floor((cam.current.x + worldW) / tilePxW) + 2;
         const maxTileY = Math.floor((cam.current.y + worldH) / tilePxH) + 2;
         const fetched = await fetchTiles(minTileX, maxTileX, minTileY, maxTileY);
-
         fetched.forEach((t: Tile) => tiles.current.set(key(t.x, t.y), t));
 
         const need = new Set<TileKey>();
@@ -715,6 +769,39 @@ function App() {
         setVersionTick(v => v + 1);
         lastRect.current = { minX: minTileX, minY: minTileY, maxX: maxTileX, maxY: maxTileY };
     }
+
+    useEffect(() => {
+        (window as any).tw2tWriteChar = (ch: string, color?: string) => {
+            if (!caret.current || !ch || Array.from(ch).length !== 1) return;
+            const snapCx = caret.current.cx;
+            const snapCy = caret.current.cy;
+            if (inProtected(snapCx, snapCy)) return;
+
+            const { tx, ty, offset } = tileForChar(snapCx, snapCy);
+            const t = ensureTile(tx, ty);
+
+            // local write
+            t.data = t.data.slice(0, offset) + ch + t.data.slice(offset + 1);
+
+            // transient overlay so you immediately see the color
+            const absKey = `${snapCx},${snapCy}`;
+            if (color) colorLayer.current.set(absKey, color);
+
+            setVersionTick(v => v + 1);
+            markRecent(snapCx, snapCy);
+
+            // send to server with color
+            queuePatch(t, offset, ch, color);
+
+            caret.current.cx = snapCx + 1;
+            followCaret.current = true;
+            if (ensureCaretEdgeFollow()) { refreshViewport(); }
+        };
+
+        return () => { delete (window as any).tw2tWriteChar; };
+    }, []);
+
+
 
     useEffect(() => {
         window.tw2tTeleport = async (opts) => {
@@ -774,13 +861,25 @@ function App() {
     // boot: hub + initial viewport
     useEffect(() => {
         const hub = getHub();
-        hub.on('tilePatched', (msg: { x: number; y: number; offset: number; text: string; version: number }) => {
+        hub.on('tilePatched', (msg: {
+            x: number; y: number; offset: number; text: string; color?: string; version: number
+        }) => {
             const t = tiles.current.get(key(msg.x, msg.y));
             if (!t) return;
+
+            // apply text
             t.data = t.data.slice(0, msg.offset) + msg.text + t.data.slice(msg.offset + msg.text.length);
+
+            // apply color if provided (server sends '#rrggbb' or undefined)
+            if (msg.color) {
+                const hex6 = toHex6(msg.color);
+                if (hex6) setLocalColorAt(t, msg.offset, hex6);
+            }
+
             t.version = msg.version;
             setVersionTick(v => v + 1);
         });
+
 
         hub.on('peerTyping', (msg: { x: number; y: number; col: number; row: number; sender: string }) => {
             const cx = msg.x * TILE_W + msg.col;
@@ -799,11 +898,54 @@ function App() {
             if (isMobileInputFocused() && e.isTrusted) return; 
             if (!caret.current) return;
 
+            const html = e.clipboardData?.getData('text/html') ?? '';
             const text = e.clipboardData?.getData('text') ?? '';
             if (!text) return;
 
+            // first Unicode code point only (your editor is 1 char per cell)
             const ch = Array.from(text)[0];
             if (!ch || ch.length !== 1) return;
+
+            // try to extract a foreground color for the first visible character from HTML
+            let fgColor: string | undefined;
+            if (html) {
+                // crude but effective: parse a temp DOM and find the first element that styles color
+                const div = document.createElement('div');
+                div.innerHTML = html;
+
+                // depth-first search for first colored text node
+                function findFirstColored(node: Node, inherited?: string): string | undefined {
+                    if (node.nodeType === Node.ELEMENT_NODE) {
+                        const el = node as HTMLElement;
+                        // prefer inline style="color: ...", fall back to attribute data
+                        const styleColor =
+                            el.style?.color ||
+                            // sometimes tools set color via <font color="#..."> (rare today)
+                            (el as any).color ||
+                            undefined;
+                        const current = styleColor || inherited;
+
+                        for (const child of Array.from(el.childNodes)) {
+                            const c = findFirstColored(child, current);
+                            if (c) return c;
+                        }
+                        return undefined;
+                    }
+                    if (node.nodeType === Node.TEXT_NODE) {
+                        const txt = node.textContent ?? '';
+                        if (txt.trim().length > 0) return inherited;
+                    }
+                    return undefined;
+                }
+
+                const c = findFirstColored(div);
+                if (c) {
+                    // Normalize common formats to a canvas-friendly string
+                    // e.g. "rgb(255, 0, 0)" or "#ff00aa" are fine as-is
+                    fgColor = c.toString();
+                }
+            }
+
 
             if (inProtected(caret.current.cx, caret.current.cy)) return;
 
@@ -814,10 +956,12 @@ function App() {
             t.data = t.data.slice(0, offset) + ch + t.data.slice(offset + 1);
             setVersionTick(v => v + 1);
             markRecent(caret.current.cx, caret.current.cy);
-            queuePatch(t, offset, ch);
+            queuePatch(t, offset, ch, fgColor);
 
-            caret.current.cx += 1;
-
+            const absKey = `${caret.current.cx},${caret.current.cy}`;
+            if (fgColor) colorLayer.current.set(absKey, fgColor);
+            
+                caret.current.cx += 1;
             followCaret.current = true;
 
             if (followCaret.current && ensureCaretEdgeFollow()) { refreshViewport(); }
@@ -1193,7 +1337,8 @@ function App() {
                     const t = ensureTile(tx, ty);
                     t.data = t.data.slice(0, offset) + ' ' + t.data.slice(offset + 1);
                     setVersionTick(v => v + 1);
-                    queuePatch(t, offset, ' ');
+                    colorLayer.current.delete(`${src.cx},${src.cy}`);
+                    queuePatch(t, offset, ' ', `#${CLEAR_HEX}`);
                 }
 
                 e.preventDefault();
@@ -1262,7 +1407,8 @@ function App() {
                     if (followCaret.current && ensureCaretEdgeFollow()) { refreshViewport(); }
 
                     markRecent(snapCx, snapCy);
-                    queuePatch(t, offset, ' ');
+                    colorLayer.current.delete(`${snapCx},${snapCy}`);
+                    queuePatch(t, offset, ' ', `#${CLEAR_HEX}`); 
                 });
                 return;
             }
@@ -1276,13 +1422,16 @@ function App() {
 
                     const { tx, ty, offset, lx, ly } = tileForChar(snapCx, snapCy);
                     sendTyping(tx, ty, lx, ly);
-                    const t = ensureTile(tx, ty);
-                    
 
+                    const t = ensureTile(tx, ty);
+
+                    // local write
                     t.data = t.data.slice(0, offset) + e.key + t.data.slice(offset + 1);
                     setVersionTick(v => v + 1);
 
                     markRecent(snapCx, snapCy);
+
+                    // send the typed character (no color clearing here)
                     queuePatch(t, offset, e.key);
 
                     if (caret.current) {
@@ -1293,6 +1442,7 @@ function App() {
                     }
                 });
                 return;
+            
             }
         }
 

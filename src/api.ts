@@ -28,7 +28,7 @@ export async function fetchTiles(
             signal: ac.signal,
         });
         if (!r.ok) throw new Error(`GET tiles ${r.status}`);
-        return (await r.json()) as Tile[];
+        return r.json() as Promise<Tile[]>;
     } catch (err) {
         if (isAbort(err)) return []; // benign: user moved; ignore quietly
         throw err;                   // real error -> let caller handle/log
@@ -39,14 +39,14 @@ export async function fetchTiles(
 }
 
 export async function patchTile(
-    x: number, y: number, offset: number, text: string, knownVersion: number
+    x: number, y: number, offset: number, text: string, knownVersion: number, colorHex?: string
 ) {
     const r = await fetch('/api/Tile/patch', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         credentials: 'include',
         cache: 'no-store',
-        body: JSON.stringify({ x, y, offset, text, knownVersion }),
+        body: JSON.stringify({ x, y, offset, text, knownVersion, colorHex }),
     });
     if (!r.ok) throw new Error(`PATCH ${r.status}`);
     return r.json() as Promise<{ version: number }>;
