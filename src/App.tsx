@@ -299,7 +299,7 @@ function App() {
                     t.data = t.data.slice(0, offset) + ch + t.data.slice(offset + 1);
 
                     markRecent(snapCx, snapCy);
-                    queuePatch(t, offset, ch);
+                    queuePatch(t, offset, ch, `#${CLEAR_HEX}`);
 
                     if (caret.current) {
                         caret.current.cx = snapCx + 1;
@@ -1469,7 +1469,7 @@ function App() {
                     markRecent(snapCx, snapCy);
 
                     // send the typed character (no color clearing here)
-                    queuePatch(t, offset, e.key);
+                    queuePatch(t, offset, e.key, `#${CLEAR_HEX}`);
 
                     if (caret.current) {
                         caret.current.cx = snapCx + 1;
@@ -1493,7 +1493,7 @@ function App() {
                     src={dimBg ? '/dark.png' : '/light.png'}
                     alt={dimBg ? 'Dark mode icon' : 'Light mode icon'}
                     width={36}
-                    height={36}              // was 24
+                    height={36}              
                     style={{ cursor: 'pointer' }}
                     title={dimBg ? 'Switch to light' : 'Switch to dim'}
                     onClick={() => {
