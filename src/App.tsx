@@ -150,9 +150,46 @@ function App() {
     }
 
     const pending = useRef<Map<TileKey, Promise<void>>>(new Map());
+
+    // --- NEW OPTIMISTIC FUNCTIONS ---
+    const optimistic = useRef<Map<TileKey, Map<number, { ch: string; color?: string }>>>(new Map());
+
+    function setOptimistic(tx: number, ty: number, offset: number, ch: string, color?: string) {
+        const k = key(tx, ty);
+        let m = optimistic.current.get(k);
+        if (!m) { m = new Map(); optimistic.current.set(k, m); }
+        m.set(offset, { ch, color });
+    }
+
+    function clearOptimistic(tx: number, ty: number, offset: number, len = 1) {
+        const k = key(tx, ty);
+        const m = optimistic.current.get(k);
+        if (!m) return;
+        for (let i = 0; i < len; i++) m.delete(offset + i);
+        if (m.size === 0) optimistic.current.delete(k);
+    }
+
+    function reapplyOptimistic(t: Tile) {
+        const m = optimistic.current.get(key(t.x, t.y));
+        if (!m || m.size === 0) return;
+
+        if (!t.color || t.color.length !== TILE_CHARS * 6) {
+            t.color = '0'.repeat(TILE_CHARS * 6);
+        }
+        for (const [offset, { ch, color }] of m) {
+
+            t.data = t.data.slice(0, offset) + ch + t.data.slice(offset + 1);
+
+            const hex6 = toHex6(color);
+            if (hex6) setLocalColorAt(t, offset, hex6);
+        }
+    }
+
     function queuePatch(t: Tile, offset: number, ch: string, color?: string) {
         const k = key(t.x, t.y);
         const prev = pending.current.get(k) ?? Promise.resolve();
+
+        setOptimistic(t.x, t.y, offset, ch, color);
 
         const hex6 = toHex6(color);
         if (hex6) setLocalColorAt(t, offset, hex6);
@@ -161,10 +198,14 @@ function App() {
             .then(async () => {
                 const res = await patchTile(t.x, t.y, offset, ch, t.version, hex6);
                 t.version = res.version;
+                clearOptimistic(t.x, t.y, offset, ch.length);
             })
             .catch(async () => {
                 const [ref] = await fetchTiles(t.x, t.x, t.y, t.y);
-                if (ref) tiles.current.set(k, ref);
+                if (ref) {
+                    reapplyOptimistic(ref);
+                    tiles.current.set(k, ref);
+                }
             })
             .finally(() => {
                 if (pending.current.get(k) === run) pending.current.delete(k);
@@ -172,6 +213,8 @@ function App() {
 
         pending.current.set(k, run);
     }
+
+
     function sendTyping(tx: number, ty: number, lx: number, ly: number) {
         const now = performance.now();
         if (now - lastTypingSentAt.current < 60) return; 
@@ -767,7 +810,10 @@ function App() {
         const maxTileX = Math.floor((cam.current.x + worldW) / tilePxW) + 2;
         const maxTileY = Math.floor((cam.current.y + worldH) / tilePxH) + 2;
         const fetched = await fetchTiles(minTileX, maxTileX, minTileY, maxTileY);
-        fetched.forEach((t: Tile) => tiles.current.set(key(t.x, t.y), t));
+        fetched.forEach((t: Tile) => {
+            reapplyOptimistic(t);                    
+            tiles.current.set(key(t.x, t.y), t);
+        });
 
         const need = new Set<TileKey>();
         for (let y = minTileY; y <= maxTileY; y++) for (let x = minTileX; x <= maxTileX; x++) need.add(key(x, y));
@@ -883,16 +929,14 @@ function App() {
             const t = tiles.current.get(key(msg.x, msg.y));
             if (!t) return;
 
-            // apply text
             t.data = t.data.slice(0, msg.offset) + msg.text + t.data.slice(msg.offset + msg.text.length);
 
-            // apply color if provided (server sends '#rrggbb' or undefined)
             if (msg.color) {
                 const hex6 = toHex6(msg.color);
                 if (hex6) setLocalColorAt(t, msg.offset, hex6);
             }
-
             t.version = msg.version;
+            reapplyOptimistic(t);
         });
 
 
