@@ -1,4 +1,12 @@
-export type Tile = { id: number; x: number; y: number; data: string; color?: string; version: number };
+export type Tile = {
+    id: number;
+    x: number;
+    y: number;
+    data: string;
+    color?: string | null;                  
+    version: number;   
+    colorCache?: (string | undefined)[];    
+};
 export type TileKey = `${number}:${number}`;
 export const key = (x: number, y: number) => `${x}:${y}` as TileKey;
 

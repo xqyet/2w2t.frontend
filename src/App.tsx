@@ -130,20 +130,45 @@ function App() {
         return undefined; 
     }
 
+    // updated 'getServerColorAt' with new cache system for colored tiles
     function getServerColorAt(tile: Tile, offset: number): string | undefined {
-        if (!tile.color || tile.color.length !== TILE_CHARS * 6) return undefined;
-        const hex = tile.color.slice(offset * 6, offset * 6 + 6);
-        if (!hex || /^0{6}$/.test(hex)) return undefined; // "unset"
-        return `#${hex}`;
+        const t = tile as Tile & { colorCache?: (string | undefined)[] };
+
+        if (!t.color || t.color.length !== TILE_CHARS * 6) {
+            t.colorCache = undefined;
+            return undefined;
+        }
+
+        if (!t.colorCache) {
+            const arr: (string | undefined)[] = new Array(TILE_CHARS);
+            for (let i = 0; i < TILE_CHARS; i++) {
+                const hex = t.color.slice(i * 6, i * 6 + 6);
+                arr[i] = hex === '000000' ? undefined : `#${hex}`;
+            }
+            t.colorCache = arr;
+        }
+
+        return t.colorCache[offset];
     }
 
+    // updated new cache instead of only the string
     function setLocalColorAt(tile: Tile, offset: number, hex6: string) {
-        if (!tile.color || tile.color.length !== TILE_CHARS * 6) {
-            tile.color = '0'.repeat(TILE_CHARS * 6);
+        const t = tile as Tile & { colorCache?: (string | undefined)[] };
+
+        if (!t.color || t.color.length !== TILE_CHARS * 6) {
+            t.color = '0'.repeat(TILE_CHARS * 6);
+            t.colorCache = undefined;
         }
         const start = offset * 6;
-        tile.color = tile.color.slice(0, start) + hex6 + tile.color.slice(start + 6);
+        t.color = t.color.slice(0, start) + hex6 + t.color.slice(start + 6);
+
+        if (!t.colorCache) {
+            t.colorCache = new Array(TILE_CHARS);
+        }
+        t.colorCache[offset] = /^0{6}$/.test(hex6) ? undefined : `#${hex6}`;
     }
+
+
     function enqueueEdit(fn: () => Promise<void> | void) {
         inputQueue.current = inputQueue.current.then(async () => { await fn(); });
         return inputQueue.current.catch(() => { }); 
@@ -675,7 +700,7 @@ function App() {
                                 }
 
                                 if (isHighlighted) {
-                                    ctx.fillStyle = '#000000';
+                                    ctx.fillStyle = '#ffeb3b';
                                     ctx.fillRect(cellLeft + 1, cellTop + 1, cellX - 0, cellY + 2);
                                 }
 
@@ -696,12 +721,13 @@ function App() {
 
                                 ctx.save();
                                 ctx.globalAlpha = alpha;
-                                const cellKey = keyRC; // `${cxAbs},${cyAbs}`
+                                const cellKey = keyRC;
                                 const idx = row * TILE_W + col;
                                 const fgServer = getServerColorAt(tile, idx);
-                                const fg = isHighlighted
-                                    ? '#fff'
-                                    : (colorLayer.current.get(cellKey) ?? fgServer ?? '#000');
+
+                                // always use the same color, ignore isHighlighted
+                                const fg = colorLayer.current.get(cellKey) ?? fgServer ?? '#000';
+
                                 ctx.fillStyle = fg;
                                 ctx.fillText(ch, cellLeft + PAD_X, cellTop + PAD_Y);
 
@@ -716,7 +742,7 @@ function App() {
                                         const top = info.cy * cellY - cam.current.y;
 
                                         // continue if (left + cellX < 0 || top + cellY < 0 || left > worldW || top > worldH);
-                                        ctx.fillStyle = '#000';
+                                        ctx.fillStyle = '#ffeb3b';
                                         ctx.fillRect(left + 1, top + 1, cellX - 0, cellY + 2);
                                     }
                                 }
