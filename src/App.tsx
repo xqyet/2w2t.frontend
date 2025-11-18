@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+﻿import { useEffect, useRef, useState } from 'react';
 import { TILE_W, TILE_H, TILE_CHARS, key, type Tile, type TileKey } from './types';
 import { fetchTiles, patchTile } from './api';
 import { getHub } from './signalr';
@@ -20,11 +20,11 @@ declare global {
 type Camera = { x: number; y: number }; // world px
 
 // --- tuning knobs ---
-const FONT_PX = 14;          // letter size (you liked this)
-const PAD_X = .8;           // left/right padding inside a cell
-const PAD_Y = 3;           // top/bottom padding inside a cell
-const DEFAULT_ZOOM_X = 0.95; // < 1.0 = slightly tighter horizontally
-const DEFAULT_ZOOM_Y = 0.94; // keep your slightly zoomed-in rows
+const FONT_PX = 14; // character font size
+const PAD_X = .8; // left/right padding inside cell
+const PAD_Y = 3; // top/bottom padding inside cell
+const DEFAULT_ZOOM_X = 0.95; // world zoom horiz
+const DEFAULT_ZOOM_Y = 0.94; // world zoom vert
 const FONT_FAMILY = '"Courier New", Courier, monospace';
 const TIGHTEN_Y = 4; // vertical space for tiles 
 const TIGHTEN_X = 1.5; // horixontal space for tiles 
@@ -32,17 +32,18 @@ const isTouch = window.matchMedia?.('(pointer: coarse)').matches ?? false;
 const viewScale = isTouch ? .80 : 1.12; // users camera view scale
 const mod = (n: number, m: number) => ((n % m) + m) % m;
 const FADE_MS = 145; // fade
-const SAMPLE_MS = 180;     // fling velocity
-const FLING_SCALE = 0.6;   // initial fling
+const SAMPLE_MS = 180; // fling velocity
+const FLING_SCALE = 0.6;   // initial cam fling
 const DECAY_PER_MS = 0.007; // higher = stops faster
 const MIN_SPEED = 0.00006;  // higher = stops earlier
 const QUIET_WINDOW_MS = 25; // camera fling timer
 const QUIET_DIST_PX = 6;   // variable to record movement (used in fling function)
-const COORD_UNIT = 10; // new way to calculate coords (divide by 10, is much cleaner)
+const COORD_UNIT = 10; // divide var to calculate coords 
 const DRAG_SENS = 0.9; // lower = less sensitive 
 const FETCH_THROTTLE_MS = 80; // viewport fetch for page reload
 const PEER_TYPING_TTL_MS = 900; // how long caret stays visible
 const MAX_CHARS_ABS = 2_000_000_000; // teleport limit (world is infinite but I need a teleport limit to prevent browser strain)
+
 
 
 // --- visual toggles ---
@@ -134,22 +135,27 @@ function App() {
     function getServerColorAt(tile: Tile, offset: number): string | undefined {
         const t = tile as Tile & { colorCache?: (string | undefined)[] };
 
+        // If we already built a cache of the right size, just use it
+        if (t.colorCache && t.colorCache.length === TILE_CHARS) {
+            return t.colorCache[offset];
+        }
+
+        // No valid color string from server yet → don't wipe any existing cache,
+        // just say "no color info" for now.
         if (!t.color || t.color.length !== TILE_CHARS * 6) {
-            t.colorCache = undefined;
             return undefined;
         }
 
-        if (!t.colorCache) {
-            const arr: (string | undefined)[] = new Array(TILE_CHARS);
-            for (let i = 0; i < TILE_CHARS; i++) {
-                const hex = t.color.slice(i * 6, i * 6 + 6);
-                arr[i] = hex === '000000' ? undefined : `#${hex}`;
-            }
-            t.colorCache = arr;
+        // Build cache once from the server string
+        const arr: (string | undefined)[] = new Array(TILE_CHARS);
+        for (let i = 0; i < TILE_CHARS; i++) {
+            const hex = t.color.slice(i * 6, i * 6 + 6);
+            arr[i] = hex === '000000' ? undefined : `#${hex}`;
         }
-
+        t.colorCache = arr;
         return t.colorCache[offset];
     }
+
 
     // updated new cache instead of only the string
     function setLocalColorAt(tile: Tile, offset: number, hex6: string) {
@@ -210,18 +216,33 @@ function App() {
         }
     }
 
+   
+
     function queuePatch(t: Tile, offset: number, ch: string, color?: string) {
         const k = key(t.x, t.y);
         const prev = pending.current.get(k) ?? Promise.resolve();
 
-        setOptimistic(t.x, t.y, offset, ch, color);
+        // If caller passed a color, normalize it; otherwise, leave color alone.
+        const hex6 = color ? toHex6(color) : undefined;
 
-        const hex6 = toHex6(color);
-        if (hex6) setLocalColorAt(t, offset, hex6);
+        // Store optimistic text + *optional* color
+        setOptimistic(t.x, t.y, offset, ch, hex6 ? `#${hex6}` : undefined);
+
+        // Update local color cache only if we actually have a color
+        if (hex6) {
+            setLocalColorAt(t, offset, hex6);
+        }
 
         const run = prev
             .then(async () => {
-                const res = await patchTile(t.x, t.y, offset, ch, t.version, hex6);
+                const res = await patchTile(
+                    t.x,
+                    t.y,
+                    offset,
+                    ch,
+                    t.version,
+                    hex6 // <-- pass hex6 or undefined; backend can take "no color" as "no color change"
+                );
                 t.version = res.version;
                 clearOptimistic(t.x, t.y, offset, ch.length);
             })
@@ -238,6 +259,8 @@ function App() {
 
         pending.current.set(k, run);
     }
+
+
 
 
     function sendTyping(tx: number, ty: number, lx: number, ly: number) {
@@ -426,7 +449,7 @@ function App() {
 
     function hubSafeInvoke<T = unknown>(method: string, ...args: any[]): Promise<T | void> {
         const hub = getHub();
-        // @ts-ignore � SignalR ConnectionState enum varies by version;
+        // @ts-ignore — SignalR ConnectionState enum varies by version;
         if (hub.state !== 'Connected') return Promise.resolve();
         return hub.invoke(method, ...args).catch(() => { });
     }
@@ -756,7 +779,7 @@ function App() {
 
                     } else if (SHOW_MISSING_PLACEHOLDER) {
                         ctx.fillStyle = '#888';
-                        ctx.fillText('�', screenX + tilePxW / 2 - 4, screenY + tilePxH / 2 - 8);
+                        ctx.fillText('…', screenX + tilePxW / 2 - 4, screenY + tilePxH / 2 - 8);
                     }
                 }
             }
@@ -835,14 +858,36 @@ function App() {
         const minTileY = Math.floor(cam.current.y / tilePxH) - 2;
         const maxTileX = Math.floor((cam.current.x + worldW) / tilePxW) + 2;
         const maxTileY = Math.floor((cam.current.y + worldH) / tilePxH) + 2;
+
         const fetched = await fetchTiles(minTileX, maxTileX, minTileY, maxTileY);
-        fetched.forEach((t: Tile) => {
-            reapplyOptimistic(t);                    
-            tiles.current.set(key(t.x, t.y), t);
+
+        fetched.forEach((incoming: Tile) => {
+            const k = key(incoming.x, incoming.y);
+            const existing = tiles.current.get(k) as (Tile & { colorCache?: (string | undefined)[] }) | undefined;
+
+            if (existing) {
+                // trust server for text + version
+                existing.data = incoming.data;
+                existing.version = incoming.version;
+
+                // only replace color if server gives a full string
+                if (incoming.color && incoming.color.length === TILE_CHARS * 6) {
+                    existing.color = incoming.color;
+                    existing.colorCache = undefined; // will rebuild lazily in getServerColorAt
+                }
+
+                reapplyOptimistic(existing);
+            } else {
+                reapplyOptimistic(incoming);
+                tiles.current.set(k, incoming);
+            }
         });
 
         const need = new Set<TileKey>();
-        for (let y = minTileY; y <= maxTileY; y++) for (let x = minTileX; x <= maxTileX; x++) need.add(key(x, y));
+        for (let y = minTileY; y <= maxTileY; y++) {
+            for (let x = minTileX; x <= maxTileX; x++) need.add(key(x, y));
+        }
+
         for (const k of need) {
             if (!joined.current.has(k)) {
                 const [x, y] = k.split(':').map(Number);
@@ -857,8 +902,10 @@ function App() {
                 joined.current.delete(k);
             }
         }
+
         lastRect.current = { minX: minTileX, minY: minTileY, maxX: maxTileX, maxY: maxTileY };
     }
+
 
     useEffect(() => {
         (window as any).tw2tWriteChar = (ch: string, color?: string) => {
@@ -1516,7 +1563,7 @@ function App() {
 
                     markRecent(snapCx, snapCy);
                     colorLayer.current.delete(`${snapCx},${snapCy}`);
-                    queuePatch(t, offset, ' ', `#${CLEAR_HEX}`); 
+                    queuePatch(t, offset, ' '); 
                 });
                 return;
             }
@@ -1539,7 +1586,7 @@ function App() {
                     markRecent(snapCx, snapCy);
 
                     // send the typed character (no color clearing here)
-                    queuePatch(t, offset, e.key, `#${CLEAR_HEX}`);
+                    queuePatch(t, offset, e.key);
 
                     if (caret.current) {
                         caret.current.cx = snapCx + 1;
