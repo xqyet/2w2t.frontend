@@ -21,7 +21,9 @@ canvas {
     display: block;
     width: 100vw;
     height: 100vh;
-    touch-action: none; 
-    -ms-touch-action: none; 
+    touch-action: none;
+    -ms-touch-action: none;
+    image-rendering: pixelated;
+    
 }
 

@@ -29,7 +29,7 @@ const FONT_FAMILY = '"Courier New", Courier, monospace';
 const TIGHTEN_Y = 4; // vertical space for tiles 
 const TIGHTEN_X = 1.5; // horixontal space for tiles 
 const isTouch = window.matchMedia?.('(pointer: coarse)').matches ?? false;
-const viewScale = isTouch ? .80 : 1.12; // users camera view scale
+const viewScale = isTouch ? .80 : .95; // users camera view scale
 const mod = (n: number, m: number) => ((n % m) + m) % m;
 const FADE_MS = 145; // fade
 const SAMPLE_MS = 180; // fling velocity
