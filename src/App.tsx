@@ -4,6 +4,12 @@ import { fetchTiles, patchTile } from './api';
 import { getHub } from './signalr';
 import './App.css';
 
+type TileWithCanvas = Tile & {
+    canvas?: HTMLCanvasElement;
+    dirty?: boolean;
+    colorCache?: (string | undefined)[];
+};
+
 declare global {
     interface Window {
         tw2tTeleport?: (opts: {
@@ -31,7 +37,6 @@ const TIGHTEN_X = 1.5; // horixontal space for tiles
 const isTouch = window.matchMedia?.('(pointer: coarse)').matches ?? false;
 const viewScale = isTouch ? .80 : .95; // users camera view scale
 const mod = (n: number, m: number) => ((n % m) + m) % m;
-const FADE_MS = 145; // fade
 const SAMPLE_MS = 180; // fling velocity
 const FLING_SCALE = 0.6;   // initial cam fling
 const DECAY_PER_MS = 0.007; // higher = stops faster
@@ -85,6 +90,7 @@ function App() {
     const lastRect = useRef<{ minX: number; minY: number; maxX: number; maxY: number } | null>(null);
     const fetchTimer = useRef<number | null>(null);
     const mobileInputRef = useRef<HTMLInputElement>(null);
+    const dprRef = useRef(window.devicePixelRatio || 1);
     const peerCarets = useRef<Map<string, { cx: number; cy: number; ts: number }>>(new Map());
     const hoverCell = useRef<{ cx: number; cy: number } | null>(null);
     const lastTypingSentAt = useRef(0);
@@ -133,7 +139,7 @@ function App() {
 
     // updated 'getServerColorAt' with new cache system for colored tiles
     function getServerColorAt(tile: Tile, offset: number): string | undefined {
-        const t = tile as Tile & { colorCache?: (string | undefined)[] };
+        const t = tile as TileWithCanvas;
 
         // If we already built a cache of the right size, just use it
         if (t.colorCache && t.colorCache.length === TILE_CHARS) {
@@ -159,7 +165,7 @@ function App() {
 
     // updated new cache instead of only the string
     function setLocalColorAt(tile: Tile, offset: number, hex6: string) {
-        const t = tile as Tile & { colorCache?: (string | undefined)[] };
+        const t = tile as TileWithCanvas;
 
         if (!t.color || t.color.length !== TILE_CHARS * 6) {
             t.color = '0'.repeat(TILE_CHARS * 6);
@@ -172,6 +178,53 @@ function App() {
             t.colorCache = new Array(TILE_CHARS);
         }
         t.colorCache[offset] = /^0{6}$/.test(hex6) ? undefined : `#${hex6}`;
+    }
+
+    function averageColorOfTile(tile: TileWithCanvas): string | undefined {
+        if (tile.color && tile.color.length === TILE_CHARS * 6) {
+            for (let i = 0; i < TILE_CHARS; i++) {
+                const hex = tile.color.slice(i * 6, i * 6 + 6);
+                if (hex !== '000000') return `#${hex}`;
+            }
+        }
+        return undefined;
+    }
+
+    
+
+    function drawTileDirect(
+        ctx: CanvasRenderingContext2D,
+        tile: TileWithCanvas,
+        screenX: number,
+        screenY: number,
+        cellX: number,
+        cellY: number
+    ) {
+        ctx.font = `${FONT_PX}px ${FONT_FAMILY}`;
+        ctx.textBaseline = 'top';
+
+        for (let row = 0; row < TILE_H; row++) {
+            for (let col = 0; col < TILE_W; col++) {
+                const idx = row * TILE_W + col;
+                const ch = tile.data[idx] ?? ' ';
+                if (ch === ' ') continue;
+
+                const cxAbs = tile.x * TILE_W + col;
+                const cyAbs = tile.y * TILE_H + row;
+                if (inProtected(cxAbs, cyAbs)) continue;
+
+                const cellLeft = screenX + col * cellX;
+                const cellTop = screenY + row * cellY;
+
+                const cellKey = `${cxAbs},${cyAbs}`;
+                const fgServer = getServerColorAt(tile, idx);
+                const fgOverlay = colorLayer.current.get(cellKey);
+                const fg = fgOverlay ?? fgServer ?? '#000';
+
+                ctx.fillStyle = fg;
+                ctx.fillText(ch, cellLeft + PAD_X, cellTop + PAD_Y);
+            }
+        }
     }
 
 
@@ -221,6 +274,8 @@ function App() {
     function queuePatch(t: Tile, offset: number, ch: string, color?: string) {
         const k = key(t.x, t.y);
         const prev = pending.current.get(k) ?? Promise.resolve();
+
+        (t as TileWithCanvas).dirty = true;
 
         // If caller passed a color, normalize it; otherwise, leave color alone.
         const hex6 = color ? toHex6(color) : undefined;
@@ -479,20 +534,23 @@ function App() {
     // ensuring a tile exists in memory so you can write immediately
     function ensureTile(tx: number, ty: number) {
         const k = key(tx, ty);
-        if (!tiles.current.has(k)) {
-            tiles.current.set(k, {
+        let t = tiles.current.get(k);
+        if (!t) {
+            t = {
                 id: 0,
                 x: tx,
                 y: ty,
                 data: ' '.repeat(TILE_CHARS),
-                color: '0'.repeat(TILE_CHARS * 6), // NEW
-                version: 0
-            });
+                color: '0'.repeat(TILE_CHARS * 6),
+                version: 0,
+                dirty: true
+            };
+            tiles.current.set(k, t);
         }
-        return tiles.current.get(k)!;
+        return t;
     }
 
-    const tiles = useRef<Map<TileKey, Tile>>(new Map());
+    const tiles = useRef<Map<TileKey, TileWithCanvas>>(new Map());
     const joined = useRef<Set<TileKey>>(new Set());
 
     // computing cell size from font metrics + padding (+ zoom)
@@ -580,14 +638,18 @@ function App() {
         let af = 0;
 
         function resize() {
-            // DPI-aware canvas backing store (crisper + predictable)
             const dpr = window.devicePixelRatio || 1;
+            dprRef.current = dpr;
+
             const cssW = cv.clientWidth || window.innerWidth;
             const cssH = cv.clientHeight || window.innerHeight;
+
             cv.width = Math.round(cssW * dpr);
             cv.height = Math.round(cssH * dpr);
-            // reset transform so 1 unit == 1 CSS pixel
+
+            // base transform: 1 CSS unit = 1 CSS pixel, then scaled by dpr
             ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+            ctx.imageSmoothingEnabled = false;
         }
         resize();
         window.addEventListener('resize', resize);
@@ -596,26 +658,31 @@ function App() {
             const cssW = cv.clientWidth || window.innerWidth;
             const cssH = cv.clientHeight || window.innerHeight;
 
+            const dpr = dprRef.current || 1;
+            const totalScale = viewScale * dpr;
+
             // clear background in CSS pixels
             ctx.fillStyle = dimBgRef.current ? '#cccccc' : '#fff';
             ctx.fillRect(0, 0, cssW, cssH);
             cv.style.backgroundColor = dimBgRef.current ? '#e9ecef' : '#fff';
 
-            const now = performance.now();
             const worldW = cssW / viewScale;
             const worldH = cssH / viewScale;
 
-            // your existing metrics
             const { cellX, cellY } = metrics(ctx);
 
             ctx.save();
             ctx.scale(viewScale, viewScale);
 
+            // Quantize camera using totalScale
+            const renderCamX = Math.round(cam.current.x * totalScale) / totalScale;
+            const renderCamY = Math.round(cam.current.y * totalScale) / totalScale;
+
             // --- protected plaza at (0,0) --- //
             linkAreas.current = []; 
 
-            const plazaLeft = PROTECT.x * cellX - cam.current.x;
-            const plazaTop = PROTECT.y * cellY - cam.current.y;
+            const plazaLeft = PROTECT.x * cellX - renderCamX;
+            const plazaTop = PROTECT.y * cellY - renderCamY;
             const plazaWpx = PROTECT.w * cellX;
             const plazaHpx = PROTECT.h * cellY;
 
@@ -663,8 +730,8 @@ function App() {
 
             if (SHOW_GRID) {
                 ctx.strokeStyle = '#e3e3e3';
-                const ox = mod(cam.current.x, cellX);
-                const oy = mod(cam.current.y, cellY);
+                const ox = mod(renderCamX, cellX);
+                const oy = mod(renderCamY, cellY);
                 for (let x = -ox; x <= worldW; x += cellX) {
                     ctx.beginPath(); ctx.moveTo(x + 0.5, 0); ctx.lineTo(x + 0.5, worldH); ctx.stroke();
                 }
@@ -673,123 +740,104 @@ function App() {
                 }
             }
 
-            const tilePxW = TILE_W * cellX, tilePxH = TILE_H * cellY;
-            const minTileX = Math.floor(cam.current.x / tilePxW) - 1;
-            const minTileY = Math.floor(cam.current.y / tilePxH) - 1;
-            const maxTileX = Math.floor((cam.current.x + worldW) / tilePxW) + 1;
-            const maxTileY = Math.floor((cam.current.y + worldH) / tilePxH) + 1;
+            const tilePxW = TILE_W * cellX;
+            const tilePxH = TILE_H * cellY;
+            const minTileX = Math.floor(renderCamX / tilePxW) - 1;
+            const minTileY = Math.floor(renderCamY / tilePxH) - 1;
+            const maxTileX = Math.floor((renderCamX + worldW) / tilePxW) + 1;
+            const maxTileY = Math.floor((renderCamY + worldH) / tilePxH) + 1;
 
             ctx.font = `${FONT_PX}px ${FONT_FAMILY}`;
             ctx.textBaseline = 'top';
+
+            const zoom = viewScale;
+            const tooZoomedOut = zoom < 0.6; // tweak if/when you add real zoom
+
             for (let ty = minTileY; ty <= maxTileY; ty++) {
                 for (let tx = minTileX; tx <= maxTileX; tx++) {
                     const k = key(tx, ty);
-                    const tile = tiles.current.get(k);
-                    const screenX = tx * tilePxW - cam.current.x;
-                    const screenY = ty * tilePxH - cam.current.y;
+                    const tile = tiles.current.get(k) as TileWithCanvas | undefined;
 
-                    ctx.strokeStyle = '#cfcfcf';
+                    // world position relative to *snapped* camera
+                    const worldX = tx * tilePxW - renderCamX;
+                    const worldY = ty * tilePxH - renderCamY;
+
+                    // already snapped via renderCamX/renderCamY; no per-tile rounding
+                    const screenX = worldX;
+                    const screenY = worldY;
+
                     if (SHOW_TILE_BORDERS) {
                         ctx.strokeStyle = '#cfcfcf';
                         ctx.strokeRect(screenX + 0.5, screenY + 0.5, tilePxW - 1, tilePxH - 1);
                     }
 
-                    if (tile) {
-                        let hiCol = -1, hiRow = -1;
-                        if (caret.current) {
-                            const caretTx = Math.floor(caret.current.cx / TILE_W);
-                            const caretTy = Math.floor(caret.current.cy / TILE_H);
-                            if (tx === caretTx && ty === caretTy) {
-                                hiCol = mod(caret.current.cx, TILE_W);
-                                hiRow = mod(caret.current.cy, TILE_H);
-                            }
+                    if (!tile) {
+                        if (SHOW_MISSING_PLACEHOLDER) {
+                            ctx.fillStyle = '#888';
+                            ctx.fillText('…', screenX + tilePxW / 2 - 4, screenY + tilePxH / 2 - 8);
                         }
-
-                        for (let row = 0; row < TILE_H; row++) {
-                            for (let col = 0; col < TILE_W; col++) {
-                                const ch = tile.data[row * TILE_W + col] ?? ' ';
-
-                                const cellLeft = screenX + col * cellX;
-                                const cellTop = screenY + row * cellY;
-
-                                // ? absolute character coordinates for this cell
-                                const cxAbs = tx * TILE_W + col;
-                                const cyAbs = ty * TILE_H + row;
-                                const suppressed = inProtected(cxAbs, cyAbs); 
-
-                                let isHighlighted = false;
-                                if (!suppressed && hiCol !== -1 && hiRow !== -1) {
-                                    isHighlighted = (col === hiCol && row === hiRow);
-                                }
-
-                                if (isHighlighted) {
-                                    ctx.fillStyle = '#ffeb3b';
-                                    ctx.fillRect(cellLeft + 1, cellTop + 1, cellX - 0, cellY + 2);
-                                }
-
-                                if (suppressed) continue;
-
-                                if (ch === ' ' && !isHighlighted) {
-                                    continue;
-                                }
-
-                                const keyRC = `${cxAbs},${cyAbs}`;
-                                let alpha = 1;
-                                const ts = recentWrites.current.get(keyRC);
-                                if (ts !== undefined) {
-                                    const t = Math.min(1, (now - ts) / FADE_MS);
-                                    alpha = 1 - Math.pow(1 - t, 3);
-                                    if (t >= 1) recentWrites.current.delete(keyRC);
-                                }
-
-                                ctx.save();
-                                ctx.globalAlpha = alpha;
-                                const cellKey = keyRC;
-                                const idx = row * TILE_W + col;
-                                const fgServer = getServerColorAt(tile, idx);
-
-                                // always use the same color, ignore isHighlighted
-                                const fg = colorLayer.current.get(cellKey) ?? fgServer ?? '#000';
-
-                                ctx.fillStyle = fg;
-                                ctx.fillText(ch, cellLeft + PAD_X, cellTop + PAD_Y);
-
-                                {
-                                    const nowPeers = performance.now();
-                                    for (const [id, info] of [...peerCarets.current]) {
-                                        if (nowPeers - info.ts > PEER_TYPING_TTL_MS) {
-                                            peerCarets.current.delete(id);
-                                            continue;
-                                        }
-                                        const left = info.cx * cellX - cam.current.x;
-                                        const top = info.cy * cellY - cam.current.y;
-
-                                        // continue if (left + cellX < 0 || top + cellY < 0 || left > worldW || top > worldH);
-                                        ctx.fillStyle = '#ffeb3b';
-                                        ctx.fillRect(left + 1, top + 1, cellX - 0, cellY + 2);
-                                    }
-                                }
-
-                                ctx.restore();
-
-
-
-                            }
-                        }
-
-                    } else if (SHOW_MISSING_PLACEHOLDER) {
-                        ctx.fillStyle = '#888';
-                        ctx.fillText('…', screenX + tilePxW / 2 - 4, screenY + tilePxH / 2 - 8);
+                        continue;
                     }
+
+                    // --- zoom-aware coarse rendering ---
+                    if (tooZoomedOut) {
+                        const avg = averageColorOfTile(tile);
+                        if (avg) {
+                            ctx.fillStyle = avg;
+                            ctx.fillRect(screenX, screenY, tilePxW, tilePxH);
+                        }
+                        continue;
+                    }
+
+                    // --- zoom-aware coarse rendering ---
+                    if (tooZoomedOut) {
+                        const avg = averageColorOfTile(tile);
+                        if (avg) {
+                            ctx.fillStyle = avg;
+                            ctx.fillRect(screenX, screenY, tilePxW, tilePxH);
+                        }
+                        continue;
+                    }
+
+                    // --- direct tile rendering (no offscreen seams) ---
+                    drawTileDirect(ctx, tile, screenX, screenY, cellX, cellY);
                 }
             }
+
+
+            // caret highlight overlay (not cached)
+            if (caret.current && !inProtected(caret.current.cx, caret.current.cy)) {
+                const caretLeft = caret.current.cx * cellX - renderCamX;
+                const caretTop = caret.current.cy * cellY - renderCamY;
+                ctx.fillStyle = '#ffeb3b';
+                ctx.fillRect(caretLeft + 1, caretTop + 1, cellX, cellY + 2);
+            }
+
+            // peer caret overlays (once per frame)
+            {
+                const nowPeers = performance.now();
+                for (const [id, info] of [...peerCarets.current]) {
+                    if (nowPeers - info.ts > PEER_TYPING_TTL_MS) {
+                        peerCarets.current.delete(id);
+                        continue;
+                    }
+                    const left = info.cx * cellX - renderCamX;
+                    const top = info.cy * cellY - renderCamY;
+                    if (left + cellX < 0 || top + cellY < 0 || left > worldW || top > worldH) continue;
+
+                    ctx.fillStyle = '#ffeb3b';
+                    ctx.fillRect(left + 1, top + 1, cellX, cellY + 2);
+                }
+            }
+
+
 
             ctx.restore(); 
 
             // --- HUD: center coordinates in bottom-right (device pixels) --- //
             {
-                const centerWorldX = cam.current.x + worldW / 2;
-                const centerWorldY = cam.current.y + worldH / 2;
+                const centerWorldX = renderCamX + worldW / 2;
+                const centerWorldY = renderCamY + worldH / 2;
                 const cxCenterExact = centerWorldX / cellX;
                 const cyCenterExact = centerWorldY / cellY;
                 const dispX = Math.trunc(cxCenterExact / COORD_UNIT);
@@ -850,6 +898,7 @@ function App() {
     async function refreshViewport() {
         const cv = canvasRef.current!;
         const ctx = cv.getContext('2d')!;
+        ctx.imageSmoothingEnabled = false;
         const { cellX, cellY } = metrics(ctx);
         const worldW = (cv.clientWidth || window.innerWidth) / viewScale;
         const worldH = (cv.clientHeight || window.innerHeight) / viewScale;
@@ -863,25 +912,26 @@ function App() {
 
         fetched.forEach((incoming: Tile) => {
             const k = key(incoming.x, incoming.y);
-            const existing = tiles.current.get(k) as (Tile & { colorCache?: (string | undefined)[] }) | undefined;
+            const existing = tiles.current.get(k);
 
             if (existing) {
-                // trust server for text + version
                 existing.data = incoming.data;
                 existing.version = incoming.version;
 
-                // only replace color if server gives a full string
                 if (incoming.color && incoming.color.length === TILE_CHARS * 6) {
                     existing.color = incoming.color;
-                    existing.colorCache = undefined; // will rebuild lazily in getServerColorAt
+                    (existing as TileWithCanvas).colorCache = undefined;
                 }
 
                 reapplyOptimistic(existing);
+                (existing as TileWithCanvas).dirty = true;
             } else {
-                reapplyOptimistic(incoming);
-                tiles.current.set(k, incoming);
+                const extended: TileWithCanvas = { ...incoming, dirty: true };
+                reapplyOptimistic(extended);
+                tiles.current.set(k, extended);
             }
         });
+
 
         const need = new Set<TileKey>();
         for (let y = minTileY; y <= maxTileY; y++) {
@@ -1010,6 +1060,7 @@ function App() {
             }
             t.version = msg.version;
             reapplyOptimistic(t);
+            (t as TileWithCanvas).dirty = true;
         });
 
 
@@ -1085,6 +1136,7 @@ function App() {
 
             // optimistic local write
             t.data = t.data.slice(0, offset) + ch + t.data.slice(offset + 1);
+            (t as TileWithCanvas).dirty = true;
             markRecent(caret.current.cx, caret.current.cy);
             queuePatch(t, offset, ch, fgColor);
 
@@ -1146,10 +1198,12 @@ function App() {
             const ctx = cv.getContext('2d')!;
             const { cellX, cellY } = metrics(ctx);
 
+            // convert screen → world (no need for renderCamX here)
             const worldX = screenWorldX + cam.current.x;
             const worldY = screenWorldY + cam.current.y;
 
-            const tilePxW = TILE_W * cellX, tilePxH = TILE_H * cellY;
+            const tilePxW = TILE_W * cellX;
+            const tilePxH = TILE_H * cellY;
             const tx = Math.floor(worldX / tilePxW);
             const ty = Math.floor(worldY / tilePxH);
             const rx = mod(worldX, tilePxW);
@@ -1157,8 +1211,12 @@ function App() {
             const lx = Math.floor(rx / cellX);
             const ly = Math.floor(ry / cellY);
 
-            hoverCell.current = { cx: tx * TILE_W + lx, cy: ty * TILE_H + ly };
+            hoverCell.current = {
+                cx: tx * TILE_W + lx,
+                cy: ty * TILE_H + ly,
+            };
         }
+
 
 
         if (!dragging.current) return;
