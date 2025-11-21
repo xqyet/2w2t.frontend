@@ -1,6 +1,6 @@
 ﻿import { useEffect, useRef, useState } from 'react';
 import { TILE_W, TILE_H, TILE_CHARS, key, type Tile, type TileKey } from './types';
-import { fetchTiles, patchTile, fetchTileExact } from './api';
+import { fetchTiles, patchTile } from './api';
 import { getHub } from './signalr';
 import './App.css';
 
@@ -52,9 +52,9 @@ const MAX_CHARS_ABS = 2_000_000_000; // teleport limit (world is infinite but I 
 
 
 // --- visual toggles ---
-const SHOW_GRID = false;              
-const SHOW_TILE_BORDERS = false;      
-const SHOW_MISSING_PLACEHOLDER = false; 
+const SHOW_GRID = false;
+const SHOW_TILE_BORDERS = false;
+const SHOW_MISSING_PLACEHOLDER = false;
 
 // --- protected plaza around (0,0) in character coordinates ---
 const PROTECT = { x: -10, y: -10, w: 35, h: 16 };
@@ -63,10 +63,10 @@ const PROTECT = { x: -10, y: -10, w: 35, h: 16 };
 const PLAZA_LINES: Array<{ text: string; link?: string; gap?: number }> = [
     { text: '2W2T', },
     { text: '~2writers2tiles~', gap: 8 },
-    { text: 'An Infinite Void to\nwrite, create, and destroy', gap: 8 }, 
-    { text: 'Chat with other users you find\nin the void!', gap:8 },
-    { text: 'How to Paste ASCII Art', link: 'https://github.com/xqyet/2w2t.ASCII#ascii-script', gap:6 },
-    { text: 'How to Teleport', link: 'https://github.com/xqyet/2w2t.ASCII#teleport-script', gap:6 },
+    { text: 'An Infinite Void to\nwrite, create, and destroy', gap: 8 },
+    { text: 'Chat with other users you find\nin the void!', gap: 8 },
+    { text: 'How to Paste ASCII Art', link: 'https://github.com/xqyet/2w2t.ASCII#ascii-script', gap: 6 },
+    { text: 'How to Teleport', link: 'https://github.com/xqyet/2w2t.ASCII#teleport-script', gap: 6 },
     { text: 'source code', link: 'https://github.com/xqyet/2w2t.frontend' },
 
 ];
@@ -134,7 +134,7 @@ function App() {
             const h = (n: number) => n.toString(16).padStart(2, '0');
             return `${h(r)}${h(g)}${h(b)}`;
         }
-        return undefined; 
+        return undefined;
     }
 
     // updated 'getServerColorAt' with new cache system for colored tiles
@@ -168,9 +168,13 @@ function App() {
         const t = tile as TileWithCanvas;
 
         if (!t.color || t.color.length !== TILE_CHARS * 6) {
-            t.color = '0'.repeat(TILE_CHARS * 6);
+            const existing = t.color ?? '';
+            // Preserve whatever the server gave us, pad the rest with zeros
+            const padded = (existing + '0'.repeat(TILE_CHARS * 6)).slice(0, TILE_CHARS * 6);
+            t.color = padded;
             t.colorCache = undefined;
         }
+
         const start = offset * 6;
         t.color = t.color.slice(0, start) + hex6 + t.color.slice(start + 6);
 
@@ -179,6 +183,7 @@ function App() {
         }
         t.colorCache[offset] = /^0{6}$/.test(hex6) ? undefined : `#${hex6}`;
     }
+
 
     function averageColorOfTile(tile: TileWithCanvas): string | undefined {
         if (tile.color && tile.color.length === TILE_CHARS * 6) {
@@ -190,7 +195,7 @@ function App() {
         return undefined;
     }
 
-    
+
 
     function drawTileDirect(
         ctx: CanvasRenderingContext2D,
@@ -230,7 +235,7 @@ function App() {
 
     function enqueueEdit(fn: () => Promise<void> | void) {
         inputQueue.current = inputQueue.current.then(async () => { await fn(); });
-        return inputQueue.current.catch(() => { }); 
+        return inputQueue.current.catch(() => { });
     }
 
     const pending = useRef<Map<TileKey, Promise<void>>>(new Map());
@@ -269,15 +274,7 @@ function App() {
         }
     }
 
-   
 
-    function isConflict(err: unknown): boolean {
-        const anyErr = err as any;
-        if (!anyErr) return false;
-        if (anyErr.status === 409) return true;
-        const msg = String(anyErr.message ?? '');
-        return msg.includes('PATCH 409') || msg.includes('409');
-    }
 
     function queuePatch(t: Tile, offset: number, ch: string, color?: string) {
         const k = key(t.x, t.y);
@@ -285,85 +282,51 @@ function App() {
 
         (t as TileWithCanvas).dirty = true;
 
-        const hex6 = color ? toHex6(color) : undefined;
+        // Normalize color only if provided (for real colored art / paste)
+        let sendHex: string | undefined;
+        let optimisticColor: string | undefined;
 
-        setOptimistic(t.x, t.y, offset, ch, hex6 ? `#${hex6}` : undefined);
+        if (color) {
+            const norm = toHex6(color); // "#ff00aa", "ff00aa", "rgb(...)" → "ff00aa"
+            if (norm) {
+                sendHex = norm;
+                const twc = t as TileWithCanvas;
 
-        if (hex6) {
-            setLocalColorAt(t, offset, hex6);
+                if (norm === CLEAR_HEX) {
+                    // Clear color for *this one cell* only
+                    optimisticColor = undefined; // means "use default black" in renderer
+                    if (twc.colorCache) twc.colorCache[offset] = undefined;
+                    // IMPORTANT: do NOT touch twc.color string here.
+                    // Let the server send an updated color string later.
+                } else {
+                    optimisticColor = `#${norm}`;
+                    // Normal colored write: update local string + cache
+                    setLocalColorAt(t, offset, norm);
+                }
+            }
         }
+
+        // Track optimistic text (and optional color) for this cell only
+        setOptimistic(t.x, t.y, offset, ch, optimisticColor);
 
         const run = prev
             .then(async () => {
-                let tileRef = t as TileWithCanvas;
-                let attempts = 0;
-
-                while (attempts < 4) {
-                    attempts++;
-                    try {
-                        const res = await patchTile(
-                            tileRef.x,
-                            tileRef.y,
-                            offset,
-                            ch,
-                            tileRef.version,
-                            hex6
-                        );
-                        // ✅ success
-                        tileRef.version = res.version;
-                        clearOptimistic(tileRef.x, tileRef.y, offset, ch.length);
-                        return;
-                    } catch (err) {
-                        if (!isConflict(err)) {
-                            console.warn('[2w2t] patch failed (non-409), giving up:', err);
-                            return;
-                        }
-
-                        console.warn(
-                            `[2w2t] 409 conflict on tile (${tileRef.x},${tileRef.y}) offset ${offset}, attempt ${attempts} – refetching`
-                        );
-
-                        // ❗ use non-abortable fetch so viewport fetches can't kill this
-                        let ref: Tile | null = null;
-                        try {
-                            ref = await fetchTileExact(tileRef.x, tileRef.y);
-                        } catch (e) {
-                            console.warn('[2w2t] fetchTileExact failed after 409:', e);
-                        }
-
-                        if (!ref) {
-                            console.warn('[2w2t] refetch after 409 returned no tile; aborting + rolling back optimistic char');
-                            // roll back local optimistic char so local view matches server
-                            clearOptimistic(tileRef.x, tileRef.y, offset, ch.length);
-                            const local = tiles.current.get(k);
-                            if (local) {
-                                local.data = local.data.slice(0, offset) + ' ' + local.data.slice(offset + ch.length);
-                                (local as TileWithCanvas).dirty = true;
-                            }
-                            return;
-                        }
-
-                        tiles.current.set(k, ref as TileWithCanvas);
-                        reapplyOptimistic(ref);
-                        tileRef = ref as TileWithCanvas;
-                    }
-                }
-
-                console.warn(
-                    '[2w2t] patch gave up after repeated 409 conflicts; resyncing tile from server'
+                const res = await patchTile(
+                    t.x,
+                    t.y,
+                    offset,
+                    ch,
+                    t.version,
+                    sendHex // undefined = "don't touch color" on server
                 );
-                const final = await fetchTileExact(t.x, t.y);
-                if (final) {
-                    tiles.current.set(k, final as TileWithCanvas);
-                    (final as TileWithCanvas).dirty = true;
-                } else {
-                    // final safety: clear optimistic + local cell
-                    clearOptimistic(t.x, t.y, offset, ch.length);
-                    const local = tiles.current.get(k);
-                    if (local) {
-                        local.data = local.data.slice(0, offset) + ' ' + local.data.slice(offset + ch.length);
-                        (local as TileWithCanvas).dirty = true;
-                    }
+                t.version = res.version;
+                clearOptimistic(t.x, t.y, offset, ch.length);
+            })
+            .catch(async () => {
+                const [ref] = await fetchTiles(t.x, t.x, t.y, t.y);
+                if (ref) {
+                    reapplyOptimistic(ref);
+                    tiles.current.set(k, ref);
                 }
             })
             .finally(() => {
@@ -377,11 +340,9 @@ function App() {
 
 
 
-
-
     function sendTyping(tx: number, ty: number, lx: number, ly: number) {
         const now = performance.now();
-        if (now - lastTypingSentAt.current < 60) return; 
+        if (now - lastTypingSentAt.current < 60) return;
         lastTypingSentAt.current = now;
 
         hubSafeInvoke('Typing', tx, ty, lx, ly);
@@ -391,7 +352,7 @@ function App() {
         if (!isTouch) return;
         const el = mobileInputRef.current;
         if (el) el.focus({ preventScroll: true });
-        primeMobileInput(); 
+        primeMobileInput();
     }
     function primeMobileInput() {
         const el = mobileInputRef.current;
@@ -413,7 +374,7 @@ function App() {
         return { minX: minTileX, minY: minTileY, maxX: maxTileX, maxY: maxTileY };
     }
     function scheduleViewportFetch() {
-        if (fetchTimer.current !== null) return; 
+        if (fetchTimer.current !== null) return;
         fetchTimer.current = window.setTimeout(async () => {
             fetchTimer.current = null;
             await refreshViewport();
@@ -425,7 +386,7 @@ function App() {
         const type = (ne && (ne as any).inputType) || '';
 
         if (type === 'deleteContentBackward' || type === 'deleteWordBackward' || type === 'deleteHardLineBackward') {
-            e.preventDefault(); 
+            e.preventDefault();
 
             enqueueEdit(() => {
                 if (!caret.current) return;
@@ -441,7 +402,7 @@ function App() {
                 t.data = t.data.slice(0, offset) + ' ' + t.data.slice(offset + 1);
                 markRecent(snapCx, snapCy);
                 colorLayer.current.delete(`${snapCx},${snapCy}`);
-                queuePatch(t, offset, ' ', `#${CLEAR_HEX}`);
+                queuePatch(t, offset, ' ');
                 followCaret.current = true;
                 if (ensureCaretEdgeFollow()) { refreshViewport(); }
             });
@@ -478,7 +439,7 @@ function App() {
 
                 markRecent(snapCx, snapCy);
                 colorLayer.current.delete(`${snapCx},${snapCy}`);
-                queuePatch(t, offset, ' ', `#${CLEAR_HEX}`); 
+                queuePatch(t, offset, ' ');
 
                 followCaret.current = true;
                 if (ensureCaretEdgeFollow()) { refreshViewport(); }
@@ -506,7 +467,10 @@ function App() {
                     t.data = t.data.slice(0, offset) + ch + t.data.slice(offset + 1);
 
                     markRecent(snapCx, snapCy);
-                    queuePatch(t, offset, ch, `#${CLEAR_HEX}`);
+
+                    // clear any transient overlay, but don't touch server color
+                    colorLayer.current.delete(`${snapCx},${snapCy}`);
+                    queuePatch(t, offset, ch);
 
                     if (caret.current) {
                         caret.current.cx = snapCx + 1;
@@ -565,12 +529,9 @@ function App() {
 
     function hubSafeInvoke<T = unknown>(method: string, ...args: any[]): Promise<T | void> {
         const hub = getHub();
-        return hub.invoke(method, ...args).catch(err => {
-            const msg = String(err?.message ?? '');
-            // Ignore the noisy "not in the 'Connected' State" errors
-            if (msg.includes("connection is not in the 'Connected' State")) return;
-            console.warn('[2w2t] hub invoke failed:', method, err);
-        });
+        // @ts-ignore — SignalR ConnectionState enum varies by version;
+        if (hub.state !== 'Connected') return Promise.resolve();
+        return hub.invoke(method, ...args).catch(() => { });
     }
 
 
@@ -581,7 +542,7 @@ function App() {
     function tileForChar(cx: number, cy: number) {
         const tx = Math.floor(cx / TILE_W);
         const ty = Math.floor(cy / TILE_H);
-        const lx = ((cx % TILE_W) + TILE_W) % TILE_W; 
+        const lx = ((cx % TILE_W) + TILE_W) % TILE_W;
         const ly = ((cy % TILE_H) + TILE_H) % TILE_H;
         const offset = ly * TILE_W + lx;
         return { tx, ty, lx, ly, offset };
@@ -590,7 +551,7 @@ function App() {
     function getCharAt(cx: number, cy: number): string {
         const { tx, ty, offset } = tileForChar(cx, cy);
         const t = tiles.current.get(key(tx, ty));
-        if (!t) return ' ';    
+        if (!t) return ' ';
         return t.data[offset] ?? ' ';
     }
 
@@ -623,7 +584,7 @@ function App() {
         const charW = ctx.measureText('M').width;
         const cellX = Math.round((charW + PAD_X * 2 - TIGHTEN_X) * DEFAULT_ZOOM_X);
         const cellY = Math.round((FONT_PX + PAD_Y * 2 - TIGHTEN_Y) * DEFAULT_ZOOM_Y);
-        return { cellX, cellY }; 
+        return { cellX, cellY };
     }
 
     // Convert "unit"/"tile"/"char" to absolute character coordinates (will recalculate ui later)
@@ -743,7 +704,7 @@ function App() {
             const renderCamY = Math.round(cam.current.y * totalScale) / totalScale;
 
             // --- protected plaza at (0,0) --- //
-            linkAreas.current = []; 
+            linkAreas.current = [];
 
             const plazaLeft = PROTECT.x * cellX - renderCamX;
             const plazaTop = PROTECT.y * cellY - renderCamY;
@@ -760,7 +721,7 @@ function App() {
 
             const lineAdvance = FONT_PX + PAD_Y * 2;
             const totalHeight = PLAZA_LINES.length * lineAdvance;
-            let yStart = plazaTop + (plazaHpx - totalHeight) / 2-40;
+            let yStart = plazaTop + (plazaHpx - totalHeight) / 2 - 40;
 
             for (const line of PLAZA_LINES) {
                 const parts = line.text.split('\n');
@@ -786,7 +747,7 @@ function App() {
                         ctx.fillText(part, x, y);
                     }
 
-                    yStart += lineAdvance; 
+                    yStart += lineAdvance;
                 }
 
                 yStart += (line.gap ?? 0);
@@ -896,7 +857,7 @@ function App() {
 
 
 
-            ctx.restore(); 
+            ctx.restore();
 
             // --- HUD: center coordinates in bottom-right (device pixels) --- //
             {
@@ -906,7 +867,7 @@ function App() {
                 const cyCenterExact = centerWorldY / cellY;
                 const dispX = Math.trunc(cxCenterExact / COORD_UNIT);
                 const dispY = Math.trunc(cyCenterExact / COORD_UNIT);
-                const fmt = new Intl.NumberFormat('en-US'); 
+                const fmt = new Intl.NumberFormat('en-US');
                 const hudText = `X:${fmt.format(dispX)} Y:${fmt.format(dispY)}`;
 
                 ctx.save();
@@ -942,9 +903,9 @@ function App() {
 
 
                 roundRect(bx, by, boxW, boxH, r);
-                ctx.fillStyle = 'rgba(0, 0, 0, 0.08)';   
+                ctx.fillStyle = 'rgba(0, 0, 0, 0.08)';
                 ctx.fill();
-                ctx.strokeStyle = 'rgba(0, 0, 0, 0.18)'; 
+                ctx.strokeStyle = 'rgba(0, 0, 0, 0.18)';
                 ctx.stroke();
                 ctx.fillStyle = '#000';
                 ctx.fillText(hudText, bx + padX, by + boxH / 2);
@@ -979,37 +940,22 @@ function App() {
             const existing = tiles.current.get(k);
 
             if (existing) {
-                const ext = existing as TileWithCanvas;
+                existing.data = incoming.data;
+                existing.version = incoming.version;
 
-                // Only trust server text if it's strictly newer than what we have
-                if (incoming.version > existing.version) {
-                    existing.data = incoming.data;
-                    existing.version = incoming.version;
-
-                    if (incoming.color && incoming.color.length === TILE_CHARS * 6) {
-                        existing.color = incoming.color;
-                        ext.colorCache = undefined;
-                    }
-                } else {
-                    // Even if text is older/same, we still want latest color string if present
-                    if (incoming.color && incoming.color.length === TILE_CHARS * 6) {
-                        if (!existing.color || existing.color !== incoming.color) {
-                            existing.color = incoming.color;
-                            ext.colorCache = undefined;
-                        }
-                    }
+                if (incoming.color && incoming.color.length === TILE_CHARS * 6) {
+                    existing.color = incoming.color;
+                    (existing as TileWithCanvas).colorCache = undefined;
                 }
 
-                // Re-apply any in-flight optimistic edits on top
                 reapplyOptimistic(existing);
-                ext.dirty = true;
+                (existing as TileWithCanvas).dirty = true;
             } else {
                 const extended: TileWithCanvas = { ...incoming, dirty: true };
                 reapplyOptimistic(extended);
                 tiles.current.set(k, extended);
             }
         });
-
 
 
         const need = new Set<TileKey>();
@@ -1111,35 +1057,11 @@ function App() {
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, []);
 
-    
-    useEffect(() => {
-        let cancelled = false;
-
-        async function loop() {
-            while (!cancelled) {
-                try {
-                    // tweak this interval to taste:
-                    // 200–300ms feels "live"; 500–1000ms is lighter on the server.
-                    await new Promise(r => setTimeout(r, 0));
-                    await refreshViewport();
-                } catch {
-                    // ignore errors so the loop keeps going
-                }
-            }
-        }
-
-        loop();
-
-        return () => {
-            cancelled = true;
-        };
-    }, []);
-
     useEffect(() => {
         function onUR(e: PromiseRejectionEvent) {
             const msg = String((e as any)?.reason?.message ?? '');
             if (msg.includes("connection is not in the 'Connected' State")) {
-                e.preventDefault(); 
+                e.preventDefault();
             }
         }
         window.addEventListener('unhandledrejection', onUR);
@@ -1180,7 +1102,7 @@ function App() {
 
     useEffect(() => {
         function onPaste(e: ClipboardEvent) {
-            if (isMobileInputFocused() && e.isTrusted) return; 
+            if (isMobileInputFocused() && e.isTrusted) return;
             if (!caret.current) return;
 
             const html = e.clipboardData?.getData('text/html') ?? '';
@@ -1245,8 +1167,8 @@ function App() {
 
             const absKey = `${caret.current.cx},${caret.current.cy}`;
             if (fgColor) colorLayer.current.set(absKey, fgColor);
-            
-                caret.current.cx += 1;
+
+            caret.current.cx += 1;
             followCaret.current = true;
 
             if (followCaret.current && ensureCaretEdgeFollow()) { refreshViewport(); }
@@ -1280,7 +1202,7 @@ function App() {
             startCamX: cam.current.x,
             startCamY: cam.current.y,
         };
-        isInertial.current = false; 
+        isInertial.current = false;
         samples.current = [{ x: e.clientX, y: e.clientY, t: performance.now() }];
     }
 
@@ -1459,11 +1381,11 @@ function App() {
         if (start && last) {
             const dt = performance.now() - start.t;
             const dist = Math.hypot(last.x - start.x, last.y - start.y);
-            const TAP_MAX_DT = 300;   
-            const TAP_MAX_DIST = 10;  
+            const TAP_MAX_DT = 300;
+            const TAP_MAX_DIST = 10;
 
             if (dt <= TAP_MAX_DT && dist <= TAP_MAX_DIST) {
-                dragging.current = null; 
+                dragging.current = null;
                 setCaretFromClientPoint(last.x, last.y);
                 return;
             }
@@ -1486,7 +1408,7 @@ function App() {
         function step() {
             if (!isInertial.current) return;
             const now = performance.now();
-            let dt = Math.min(now - last, 40); 
+            let dt = Math.min(now - last, 40);
             last = now;
 
             cam.current.x -= velocity.current.vx * dt;
@@ -1655,7 +1577,8 @@ function App() {
                     const t = ensureTile(tx, ty);
                     t.data = t.data.slice(0, offset) + ' ' + t.data.slice(offset + 1);
                     colorLayer.current.delete(`${src.cx},${src.cy}`);
-                    queuePatch(t, offset, ' ', `#${CLEAR_HEX}`); // clear color on server
+                    queuePatch(t, offset, ' '); // don't send color
+
                 }
 
                 e.preventDefault();
@@ -1724,11 +1647,10 @@ function App() {
 
                     markRecent(snapCx, snapCy);
                     colorLayer.current.delete(`${snapCx},${snapCy}`);
-                    queuePatch(t, offset, ' '); 
+                    queuePatch(t, offset, ' ', CLEAR_HEX);
                 });
                 return;
             }
-
             if (e.key.length === 1) {
                 enqueueEdit(() => {
                     if (!caret.current) return;
@@ -1746,8 +1668,11 @@ function App() {
 
                     markRecent(snapCx, snapCy);
 
-                    // send the typed character (no color clearing here)
-                    queuePatch(t, offset, e.key);
+                    // drop any transient overlay color locally
+                    colorLayer.current.delete(`${snapCx},${snapCy}`);
+
+                    // send the character and clear its stored color on the server
+                    queuePatch(t, offset, e.key, CLEAR_HEX);
 
                     if (caret.current) {
                         caret.current.cx = snapCx + 1;
@@ -1756,7 +1681,6 @@ function App() {
                     }
                 });
                 return;
-            
             }
         }
 
@@ -1771,7 +1695,7 @@ function App() {
                     src={dimBg ? '/dark.png' : '/light.png'}
                     alt={dimBg ? 'Dark mode icon' : 'Light mode icon'}
                     width={36}
-                    height={36}              
+                    height={36}
                     style={{ cursor: 'pointer' }}
                     title={dimBg ? 'Switch to light' : 'Switch to dim'}
                     onClick={() => {
@@ -1817,7 +1741,7 @@ function App() {
                     border: 0,
                     background: 'transparent'
                 }}
-                onBeforeInput={onMobileBeforeInput} 
+                onBeforeInput={onMobileBeforeInput}
                 onInput={onMobileInput}
                 onBlur={keepFocusIfEditing}
             />

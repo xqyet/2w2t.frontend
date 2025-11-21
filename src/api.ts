@@ -16,6 +16,7 @@ export async function fetchTiles(
 ): Promise<Tile[]> {
     const url = `/api/Tile?minX=${minX}&maxX=${maxX}&minY=${minY}&maxY=${maxY}`;
 
+    // cancel the previous request if a new one starts
     inFlight?.abort();
     const ac = new AbortController();
     inFlight = ac;
@@ -29,23 +30,12 @@ export async function fetchTiles(
         if (!r.ok) throw new Error(`GET tiles ${r.status}`);
         return r.json() as Promise<Tile[]>;
     } catch (err) {
-        if (isAbort(err)) return [];
-        throw err;
+        if (isAbort(err)) return []; // benign: user moved; ignore quietly
+        throw err;                   // real error -> let caller handle/log
     } finally {
+        // clear the handle only if this is the latest controller
         if (inFlight === ac) inFlight = null;
     }
-}
-
-// new helper used only for conflict recovery: no shared AbortController
-export async function fetchTileExact(x: number, y: number): Promise<Tile | null> {
-    const url = `/api/Tile?minX=${x}&maxX=${x}&minY=${y}&maxY=${y}`;
-    const r = await fetch(url, {
-        credentials: 'include',
-        cache: 'no-store',
-    });
-    if (!r.ok) throw new Error(`GET tile ${r.status}`);
-    const arr = await r.json() as Tile[];
-    return arr[0] ?? null;
 }
 
 export async function patchTile(
@@ -58,12 +48,6 @@ export async function patchTile(
         cache: 'no-store',
         body: JSON.stringify({ x, y, offset, text, knownVersion, colorHex }),
     });
-
-    if (!r.ok) {
-        const err: any = new Error(`PATCH ${r.status}`);
-        err.status = r.status;
-        throw err;
-    }
-
+    if (!r.ok) throw new Error(`PATCH ${r.status}`);
     return r.json() as Promise<{ version: number }>;
 }
