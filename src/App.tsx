@@ -657,7 +657,7 @@ function App() {
         }
     }
 
-    function clearAreaAround(cxCenter: number, cyCenter: number, tileRadius = 1) {
+    function clearAreaAround(cxCenter: number, cyCenter: number, tileRadius = .4) {
         enqueueEdit(async () => {
             const { tx: centerTx, ty: centerTy } = tileForChar(cxCenter, cyCenter);
 
