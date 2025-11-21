@@ -1,6 +1,6 @@
 ﻿import { useEffect, useRef, useState } from 'react';
 import { TILE_W, TILE_H, TILE_CHARS, key, type Tile, type TileKey } from './types';
-import { fetchTiles, patchTile } from './api';
+import { fetchTiles, patchTile, fetchTileExact } from './api';
 import { getHub } from './signalr';
 import './App.css';
 
@@ -271,41 +271,99 @@ function App() {
 
    
 
+    function isConflict(err: unknown): boolean {
+        const anyErr = err as any;
+        if (!anyErr) return false;
+        if (anyErr.status === 409) return true;
+        const msg = String(anyErr.message ?? '');
+        return msg.includes('PATCH 409') || msg.includes('409');
+    }
+
     function queuePatch(t: Tile, offset: number, ch: string, color?: string) {
         const k = key(t.x, t.y);
         const prev = pending.current.get(k) ?? Promise.resolve();
 
         (t as TileWithCanvas).dirty = true;
 
-        // If caller passed a color, normalize it; otherwise, leave color alone.
         const hex6 = color ? toHex6(color) : undefined;
 
-        // Store optimistic text + *optional* color
         setOptimistic(t.x, t.y, offset, ch, hex6 ? `#${hex6}` : undefined);
 
-        // Update local color cache only if we actually have a color
         if (hex6) {
             setLocalColorAt(t, offset, hex6);
         }
 
         const run = prev
             .then(async () => {
-                const res = await patchTile(
-                    t.x,
-                    t.y,
-                    offset,
-                    ch,
-                    t.version,
-                    hex6 // <-- pass hex6 or undefined; backend can take "no color" as "no color change"
+                let tileRef = t as TileWithCanvas;
+                let attempts = 0;
+
+                while (attempts < 4) {
+                    attempts++;
+                    try {
+                        const res = await patchTile(
+                            tileRef.x,
+                            tileRef.y,
+                            offset,
+                            ch,
+                            tileRef.version,
+                            hex6
+                        );
+                        // ✅ success
+                        tileRef.version = res.version;
+                        clearOptimistic(tileRef.x, tileRef.y, offset, ch.length);
+                        return;
+                    } catch (err) {
+                        if (!isConflict(err)) {
+                            console.warn('[2w2t] patch failed (non-409), giving up:', err);
+                            return;
+                        }
+
+                        console.warn(
+                            `[2w2t] 409 conflict on tile (${tileRef.x},${tileRef.y}) offset ${offset}, attempt ${attempts} – refetching`
+                        );
+
+                        // ❗ use non-abortable fetch so viewport fetches can't kill this
+                        let ref: Tile | null = null;
+                        try {
+                            ref = await fetchTileExact(tileRef.x, tileRef.y);
+                        } catch (e) {
+                            console.warn('[2w2t] fetchTileExact failed after 409:', e);
+                        }
+
+                        if (!ref) {
+                            console.warn('[2w2t] refetch after 409 returned no tile; aborting + rolling back optimistic char');
+                            // roll back local optimistic char so local view matches server
+                            clearOptimistic(tileRef.x, tileRef.y, offset, ch.length);
+                            const local = tiles.current.get(k);
+                            if (local) {
+                                local.data = local.data.slice(0, offset) + ' ' + local.data.slice(offset + ch.length);
+                                (local as TileWithCanvas).dirty = true;
+                            }
+                            return;
+                        }
+
+                        tiles.current.set(k, ref as TileWithCanvas);
+                        reapplyOptimistic(ref);
+                        tileRef = ref as TileWithCanvas;
+                    }
+                }
+
+                console.warn(
+                    '[2w2t] patch gave up after repeated 409 conflicts; resyncing tile from server'
                 );
-                t.version = res.version;
-                clearOptimistic(t.x, t.y, offset, ch.length);
-            })
-            .catch(async () => {
-                const [ref] = await fetchTiles(t.x, t.x, t.y, t.y);
-                if (ref) {
-                    reapplyOptimistic(ref);
-                    tiles.current.set(k, ref);
+                const final = await fetchTileExact(t.x, t.y);
+                if (final) {
+                    tiles.current.set(k, final as TileWithCanvas);
+                    (final as TileWithCanvas).dirty = true;
+                } else {
+                    // final safety: clear optimistic + local cell
+                    clearOptimistic(t.x, t.y, offset, ch.length);
+                    const local = tiles.current.get(k);
+                    if (local) {
+                        local.data = local.data.slice(0, offset) + ' ' + local.data.slice(offset + ch.length);
+                        (local as TileWithCanvas).dirty = true;
+                    }
                 }
             })
             .finally(() => {
@@ -314,6 +372,9 @@ function App() {
 
         pending.current.set(k, run);
     }
+
+
+
 
 
 
@@ -504,9 +565,12 @@ function App() {
 
     function hubSafeInvoke<T = unknown>(method: string, ...args: any[]): Promise<T | void> {
         const hub = getHub();
-        // @ts-ignore — SignalR ConnectionState enum varies by version;
-        if (hub.state !== 'Connected') return Promise.resolve();
-        return hub.invoke(method, ...args).catch(() => { });
+        return hub.invoke(method, ...args).catch(err => {
+            const msg = String(err?.message ?? '');
+            // Ignore the noisy "not in the 'Connected' State" errors
+            if (msg.includes("connection is not in the 'Connected' State")) return;
+            console.warn('[2w2t] hub invoke failed:', method, err);
+        });
     }
 
 
@@ -915,22 +979,37 @@ function App() {
             const existing = tiles.current.get(k);
 
             if (existing) {
-                existing.data = incoming.data;
-                existing.version = incoming.version;
+                const ext = existing as TileWithCanvas;
 
-                if (incoming.color && incoming.color.length === TILE_CHARS * 6) {
-                    existing.color = incoming.color;
-                    (existing as TileWithCanvas).colorCache = undefined;
+                // Only trust server text if it's strictly newer than what we have
+                if (incoming.version > existing.version) {
+                    existing.data = incoming.data;
+                    existing.version = incoming.version;
+
+                    if (incoming.color && incoming.color.length === TILE_CHARS * 6) {
+                        existing.color = incoming.color;
+                        ext.colorCache = undefined;
+                    }
+                } else {
+                    // Even if text is older/same, we still want latest color string if present
+                    if (incoming.color && incoming.color.length === TILE_CHARS * 6) {
+                        if (!existing.color || existing.color !== incoming.color) {
+                            existing.color = incoming.color;
+                            ext.colorCache = undefined;
+                        }
+                    }
                 }
 
+                // Re-apply any in-flight optimistic edits on top
                 reapplyOptimistic(existing);
-                (existing as TileWithCanvas).dirty = true;
+                ext.dirty = true;
             } else {
                 const extended: TileWithCanvas = { ...incoming, dirty: true };
                 reapplyOptimistic(extended);
                 tiles.current.set(k, extended);
             }
         });
+
 
 
         const need = new Set<TileKey>();
@@ -1030,6 +1109,30 @@ function App() {
 
         return () => { delete window.tw2tTeleport; };
         // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, []);
+
+    
+    useEffect(() => {
+        let cancelled = false;
+
+        async function loop() {
+            while (!cancelled) {
+                try {
+                    // tweak this interval to taste:
+                    // 200–300ms feels "live"; 500–1000ms is lighter on the server.
+                    await new Promise(r => setTimeout(r, 0));
+                    await refreshViewport();
+                } catch {
+                    // ignore errors so the loop keeps going
+                }
+            }
+        }
+
+        loop();
+
+        return () => {
+            cancelled = true;
+        };
     }, []);
 
     useEffect(() => {
