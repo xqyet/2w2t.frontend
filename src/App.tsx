@@ -51,6 +51,7 @@ const MAX_CHARS_ABS = 2_000_000_000; // teleport limit (world is infinite but I 
 
 
 
+
 // --- visual toggles ---
 const SHOW_GRID = false;
 const SHOW_TILE_BORDERS = false;
@@ -71,7 +72,7 @@ const PLAZA_LINES: Array<{ text: string; link?: string; gap?: number }> = [
 
 ];
 
-// helper
+// some helpers
 const inProtected = (cx: number, cy: number) =>
     cx >= PROTECT.x && cx < PROTECT.x + PROTECT.w &&
     cy >= PROTECT.y && cy < PROTECT.y + PROTECT.h;
@@ -106,6 +107,7 @@ function App() {
     const ZWS = '\u200B';
     const CLEAR_HEX = '000000';
     const dimBgRef = useRef(dimBg);
+    const leftCtrlDown = useRef(false);
 
     useEffect(() => { dimBgRef.current = dimBg; }, [dimBg]);
     const lastCursor = useRef<string>('default');
@@ -137,22 +139,18 @@ function App() {
         return undefined;
     }
 
-    // updated 'getServerColorAt' with new cache system for colored tiles
     function getServerColorAt(tile: Tile, offset: number): string | undefined {
         const t = tile as TileWithCanvas;
 
-        // If we already built a cache of the right size, just use it
         if (t.colorCache && t.colorCache.length === TILE_CHARS) {
             return t.colorCache[offset];
         }
 
-        // No valid color string from server yet → don't wipe any existing cache,
-        // just say "no color info" for now.
         if (!t.color || t.color.length !== TILE_CHARS * 6) {
             return undefined;
         }
 
-        // Build cache once from the server string
+        // Build cache 
         const arr: (string | undefined)[] = new Array(TILE_CHARS);
         for (let i = 0; i < TILE_CHARS; i++) {
             const hex = t.color.slice(i * 6, i * 6 + 6);
@@ -162,8 +160,6 @@ function App() {
         return t.colorCache[offset];
     }
 
-
-    // updated new cache instead of only the string
     function setLocalColorAt(tile: Tile, offset: number, hex6: string) {
         const t = tile as TileWithCanvas;
 
@@ -231,7 +227,6 @@ function App() {
             }
         }
     }
-
 
     function enqueueEdit(fn: () => Promise<void> | void) {
         inputQueue.current = inputQueue.current.then(async () => { await fn(); });
@@ -538,7 +533,109 @@ function App() {
     function markRecent(cx: number, cy: number) {
         recentWrites.current.set(`${cx},${cy}`, performance.now());
     }
-    // converting absolute char coords -> tile/local position
+
+    function tileIntersectsProtected(tx: number, ty: number): boolean {
+        // Tile bounds in char-coordinates
+        const minCx = tx * TILE_W;
+        const maxCx = minCx + TILE_W - 1;
+        const minCy = ty * TILE_H;
+        const maxCy = minCy + TILE_H - 1;
+
+        // Protected rect bounds
+        const px1 = PROTECT.x;
+        const py1 = PROTECT.y;
+        const px2 = PROTECT.x + PROTECT.w - 1;
+        const py2 = PROTECT.y + PROTECT.h - 1;
+
+        // AABB intersection test
+        const separated =
+            maxCx < px1 || minCx > px2 ||
+            maxCy < py1 || minCy > py2;
+
+        return !separated;
+    }
+
+    async function clearTileHard(tx: number, ty: number): Promise<void> {
+        const k = key(tx, ty);
+
+        let t = tiles.current.get(k) as TileWithCanvas | undefined;
+        if (!t) {
+            t = {
+                id: 0,
+                x: tx,
+                y: ty,
+                data: ' '.repeat(TILE_CHARS),
+                color: '0'.repeat(TILE_CHARS * 6),
+                version: 0,
+                dirty: true
+            };
+            tiles.current.set(k, t);
+        }
+
+        let tileRef: TileWithCanvas = t;
+        let attempts = 0;
+
+        while (attempts < 4) {
+            attempts++;
+
+            tileRef.data = ' '.repeat(TILE_CHARS);
+            tileRef.color = '0'.repeat(TILE_CHARS * 6);
+            tileRef.colorCache = undefined;
+            tileRef.dirty = true;
+
+            try {
+                const res = await patchTile(
+                    tileRef.x,
+                    tileRef.y,
+                    0,
+                    tileRef.data,
+                    tileRef.version,
+                    CLEAR_HEX 
+                );
+                tileRef.version = res.version;
+                return;
+            } catch (err) {
+                if (!isConflict(err)) {
+                    console.warn('[2w2t] clearTileHard failed:', err);
+                    return;
+                }
+
+                console.warn(
+                    `[2w2t] 409 on clearTileHard (${tileRef.x},${tileRef.y}), attempt ${attempts} – refetching`
+                );
+
+                let ref: Tile | null = null;
+                try {
+                    ref = await fetchTileExact(tileRef.x, tileRef.y);
+                } catch (e) {
+                    console.warn('[2w2t] fetchTileExact failed during clearTileHard:', e);
+                }
+
+                if (!ref) {
+                    console.warn('[2w2t] clearTileHard refetch returned no tile; giving up');
+                    return;
+                }
+
+                const ext = ref as TileWithCanvas;
+                tiles.current.set(k, ext);
+                tileRef = ext;
+            }
+        }
+    }
+
+    function clearAreaAround(cxCenter: number, cyCenter: number, tileRadius = 1) {
+        enqueueEdit(async () => {
+            const { tx: centerTx, ty: centerTy } = tileForChar(cxCenter, cyCenter);
+
+            for (let ty = centerTy - tileRadius; ty <= centerTy + tileRadius; ty++) {
+                for (let tx = centerTx - tileRadius; tx <= centerTx + tileRadius; tx++) {
+                    if (tileIntersectsProtected(tx, ty)) continue;
+                    await clearTileHard(tx, ty);
+                }
+            }
+        });
+    }
+
     function tileForChar(cx: number, cy: number) {
         const tx = Math.floor(cx / TILE_W);
         const ty = Math.floor(cy / TILE_H);
@@ -555,8 +652,6 @@ function App() {
         return t.data[offset] ?? ' ';
     }
 
-
-    // ensuring a tile exists in memory so you can write immediately
     function ensureTile(tx: number, ty: number) {
         const k = key(tx, ty);
         let t = tiles.current.get(k);
@@ -578,7 +673,6 @@ function App() {
     const tiles = useRef<Map<TileKey, TileWithCanvas>>(new Map());
     const joined = useRef<Set<TileKey>>(new Set());
 
-    // computing cell size from font metrics + padding (+ zoom)
     function metrics(ctx: CanvasRenderingContext2D) {
         ctx.font = `${FONT_PX}px ${FONT_FAMILY}`;
         const charW = ctx.measureText('M').width;
@@ -686,7 +780,6 @@ function App() {
             const dpr = dprRef.current || 1;
             const totalScale = viewScale * dpr;
 
-            // clear background in CSS pixels
             ctx.fillStyle = dimBgRef.current ? '#cccccc' : '#fff';
             ctx.fillRect(0, 0, cssW, cssH);
             cv.style.backgroundColor = dimBgRef.current ? '#e9ecef' : '#fff';
@@ -776,7 +869,7 @@ function App() {
             ctx.textBaseline = 'top';
 
             const zoom = viewScale;
-            const tooZoomedOut = zoom < 0.6; // tweak if/when you add real zoom
+            const tooZoomedOut = zoom < 0.6; 
 
             for (let ty = minTileY; ty <= maxTileY; ty++) {
                 for (let tx = minTileX; tx <= maxTileX; tx++) {
@@ -804,7 +897,6 @@ function App() {
                         continue;
                     }
 
-                    // --- zoom-aware coarse rendering ---
                     if (tooZoomedOut) {
                         const avg = averageColorOfTile(tile);
                         if (avg) {
@@ -814,7 +906,6 @@ function App() {
                         continue;
                     }
 
-                    // --- zoom-aware coarse rendering ---
                     if (tooZoomedOut) {
                         const avg = averageColorOfTile(tile);
                         if (avg) {
@@ -824,11 +915,10 @@ function App() {
                         continue;
                     }
 
-                    // --- direct tile rendering (no offscreen seams) ---
+                    // --- direct tile rendering  ---
                     drawTileDirect(ctx, tile, screenX, screenY, cellX, cellY);
                 }
             }
-
 
             // caret highlight overlay (not cached)
             if (caret.current && !inProtected(caret.current.cx, caret.current.cy)) {
@@ -838,7 +928,6 @@ function App() {
                 ctx.fillRect(caretLeft + 1, caretTop + 1, cellX, cellY + 2);
             }
 
-            // peer caret overlays (once per frame)
             {
                 const nowPeers = performance.now();
                 for (const [id, info] of [...peerCarets.current]) {
@@ -995,13 +1084,11 @@ function App() {
             // local write
             t.data = t.data.slice(0, offset) + ch + t.data.slice(offset + 1);
 
-            // transient overlay so you immediately see the color
             const absKey = `${snapCx},${snapCy}`;
             if (color) colorLayer.current.set(absKey, color);
 
             markRecent(snapCx, snapCy);
 
-            // send to server with color
             queuePatch(t, offset, ch, color);
 
             caret.current.cx = snapCx + 1;
@@ -1109,25 +1196,21 @@ function App() {
             const text = e.clipboardData?.getData('text') ?? '';
             if (!text) return;
 
-            // first Unicode code point only (your editor is 1 char per cell)
+            // first Unicode code point only 
             const ch = Array.from(text)[0];
             if (!ch || ch.length !== 1) return;
 
-            // try to extract a foreground color for the first visible character from HTML
             let fgColor: string | undefined;
             if (html) {
-                // crude but effective: parse a temp DOM and find the first element that styles color
                 const div = document.createElement('div');
                 div.innerHTML = html;
 
-                // depth-first search for first colored text node
                 function findFirstColored(node: Node, inherited?: string): string | undefined {
                     if (node.nodeType === Node.ELEMENT_NODE) {
                         const el = node as HTMLElement;
                         // prefer inline style="color: ...", fall back to attribute data
                         const styleColor =
                             el.style?.color ||
-                            // sometimes tools set color via <font color="#..."> (rare today)
                             (el as any).color ||
                             undefined;
                         const current = styleColor || inherited;
@@ -1147,8 +1230,6 @@ function App() {
 
                 const c = findFirstColored(div);
                 if (c) {
-                    // Normalize common formats to a canvas-friendly string
-                    // e.g. "rgb(255, 0, 0)" or "#ff00aa" are fine as-is
                     fgColor = c.toString();
                 }
             }
@@ -1361,11 +1442,11 @@ function App() {
 
     function getColorAt(cx: number, cy: number): string | undefined {
         const overlay = colorLayer.current.get(`${cx},${cy}`);
-        if (overlay) return overlay; // transient/local color
+        if (overlay) return overlay; 
         const { tx, ty, offset } = tileForChar(cx, cy);
         const t = tiles.current.get(key(tx, ty));
         if (!t) return undefined;
-        return getServerColorAt(t, offset); // '#rrggbb' | undefined
+        return getServerColorAt(t, offset); 
     }
     const escapeHtml = (s: string) =>
         s.replace(/[&<>"']/g, m => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[m]!));
@@ -1490,11 +1571,10 @@ function App() {
         const { cellX, cellY } = metrics(ctx);
         const rect = cv.getBoundingClientRect();
 
-        // coords in the same (pre-scale, screen-space) system used for linkAreas
         const screenWorldX = (e.clientX - rect.left) / viewScale;
         const screenWorldY = (e.clientY - rect.top) / viewScale;
 
-        // ? link hit-test must use screenWorldX/Y (NOT worldX/Y)
+        // Link hit-test in screen space
         for (const a of linkAreas.current) {
             if (
                 screenWorldX >= a.x && screenWorldX <= a.x + a.w &&
@@ -1505,7 +1585,7 @@ function App() {
             }
         }
 
-        // From here down, convert to world space for caret placement
+        // Convert to world space for tile / caret
         const worldX = screenWorldX + cam.current.x;
         const worldY = screenWorldY + cam.current.y;
 
@@ -1524,10 +1604,17 @@ function App() {
         const clickedCy = Math.floor(worldY / cellY);
         if (inProtected(clickedCx, clickedCy)) return;
 
+        if (leftCtrlDown.current && e.button === 0) {
+            clearAreaAround(cx, cy, 4);
+            return;
+        }
+
+        // Normal behavior: move caret
         ensureTile(tx, ty);
         caret.current = { cx, cy, anchorCx: cx };
         focusMobileInput();
     }
+
 
 
     useEffect(() => {
@@ -1545,7 +1632,7 @@ function App() {
                 if (!src || inProtected(src.cx, src.cy)) { e.preventDefault(); return; }
 
                 const ch = getCharAt(src.cx, src.cy) || ' ';
-                const color = getColorAt(src.cx, src.cy); // '#rrggbb' | undefined
+                const color = getColorAt(src.cx, src.cy); 
                 const html = color
                     ? `<span style="color:${color}">${escapeHtml(ch)}</span>`
                     : escapeHtml(ch);
@@ -1592,7 +1679,7 @@ function App() {
                 e.key === 'CapsLock' ||
                 e.key === 'NumLock' ||
                 e.key === 'ScrollLock' ||
-                e.key === 'Dead' ||      // IME / accent start
+                e.key === 'Dead' ||     
                 e.key === 'Escape' ||
                 e.key === 'Tab'
             ) {
