@@ -25,7 +25,7 @@ declare global {
 
 type Camera = { x: number; y: number }; // world px
 
-// --- tuning knobs ---
+// --- adjustable var ---
 const FONT_PX = 14; // character font size
 const PAD_X = .8; // left/right padding inside cell
 const PAD_Y = 3; // top/bottom padding inside cell
@@ -51,7 +51,7 @@ const MAX_CHARS_ABS = 2_000_000_000; // teleport limit (world is infinite but I 
 
 
 
-// --- visual toggles ---
+// --- some visual toggles ---
 const SHOW_GRID = false;
 const SHOW_TILE_BORDERS = false;
 const SHOW_MISSING_PLACEHOLDER = false;
@@ -71,7 +71,7 @@ const PLAZA_LINES: Array<{ text: string; link?: string; gap?: number }> = [
 
 ];
 
-// helper
+// some helpers
 const inProtected = (cx: number, cy: number) =>
     cx >= PROTECT.x && cx < PROTECT.x + PROTECT.w &&
     cy >= PROTECT.y && cy < PROTECT.y + PROTECT.h;
@@ -141,13 +141,10 @@ function App() {
     function getServerColorAt(tile: Tile, offset: number): string | undefined {
         const t = tile as TileWithCanvas;
 
-        // If we already built a cache of the right size, just use it
         if (t.colorCache && t.colorCache.length === TILE_CHARS) {
             return t.colorCache[offset];
         }
-
-        // No valid color string from server yet → don't wipe any existing cache,
-        // just say "no color info" for now.
+        
         if (!t.color || t.color.length !== TILE_CHARS * 6) {
             return undefined;
         }
@@ -162,14 +159,11 @@ function App() {
         return t.colorCache[offset];
     }
 
-
-    // updated new cache instead of only the string
     function setLocalColorAt(tile: Tile, offset: number, hex6: string) {
         const t = tile as TileWithCanvas;
 
         if (!t.color || t.color.length !== TILE_CHARS * 6) {
             const existing = t.color ?? '';
-            // Preserve whatever the server gave us, pad the rest with zeros
             const padded = (existing + '0'.repeat(TILE_CHARS * 6)).slice(0, TILE_CHARS * 6);
             t.color = padded;
             t.colorCache = undefined;
@@ -184,7 +178,6 @@ function App() {
         t.colorCache[offset] = /^0{6}$/.test(hex6) ? undefined : `#${hex6}`;
     }
 
-
     function averageColorOfTile(tile: TileWithCanvas): string | undefined {
         if (tile.color && tile.color.length === TILE_CHARS * 6) {
             for (let i = 0; i < TILE_CHARS; i++) {
@@ -194,8 +187,6 @@ function App() {
         }
         return undefined;
     }
-
-
 
     function drawTileDirect(
         ctx: CanvasRenderingContext2D,
@@ -282,35 +273,27 @@ function App() {
 
         (t as TileWithCanvas).dirty = true;
 
-        // Normalize color only if provided (for real colored art / paste)
         let sendHex: string | undefined;
         let optimisticColor: string | undefined;
 
         if (color) {
-            const norm = toHex6(color); // "#ff00aa", "ff00aa", "rgb(...)" → "ff00aa"
+            const norm = toHex6(color); 
             if (norm) {
                 sendHex = norm;
 
                 if (norm === CLEAR_HEX) {
-                    // Clear color for *this one cell* only
                     optimisticColor = undefined;
-
-                    // Immediately zero out this cell in the local color string
-                    // and clear cache for that offset
-                    setLocalColorAt(t, offset, norm); // writes "000000" for this cell
+                    // clear cache for offset
+                    setLocalColorAt(t, offset, norm); 
                 } else {
                     optimisticColor = `#${norm}`;
-                    // Normal colored write: update local string + cache
                     setLocalColorAt(t, offset, norm);
                 }
 
 
             }
         }
-
-        // Track optimistic text (and optional color) for this cell only
         setOptimistic(t.x, t.y, offset, ch, optimisticColor);
-
         const run = prev
             .then(async () => {
                 const res = await patchTile(
@@ -319,7 +302,7 @@ function App() {
                     offset,
                     ch,
                     t.version,
-                    sendHex // undefined = "don't touch color" on server
+                    sendHex 
                 );
                 t.version = res.version;
                 clearOptimistic(t.x, t.y, offset, ch.length);
@@ -470,7 +453,6 @@ function App() {
 
                     markRecent(snapCx, snapCy);
 
-                    // clear any transient overlay, but don't touch server color
                     colorLayer.current.delete(`${snapCx},${snapCy}`);
                     queuePatch(t, offset, ch);
 
@@ -540,7 +522,8 @@ function App() {
     function markRecent(cx: number, cy: number) {
         recentWrites.current.set(`${cx},${cy}`, performance.now());
     }
-    // converting absolute char coords -> tile/local position
+    
+    // converts absolute char coords -> tile/local position
     function tileForChar(cx: number, cy: number) {
         const tx = Math.floor(cx / TILE_W);
         const ty = Math.floor(cy / TILE_H);
@@ -557,8 +540,7 @@ function App() {
         return t.data[offset] ?? ' ';
     }
 
-
-    // ensuring a tile exists in memory so you can write immediately
+    // ensures a tile exists in memory so you can write immediately
     function ensureTile(tx: number, ty: number) {
         const k = key(tx, ty);
         let t = tiles.current.get(k);
@@ -589,7 +571,7 @@ function App() {
         return { cellX, cellY };
     }
 
-    // Convert "unit"/"tile"/"char" to absolute character coordinates (will recalculate ui later)
+    // Convert "unit"/"tile"/"char" to absolute character coordinates (will recalculate in ui later)
     function toCharCoords(
         x: number,
         y: number,
@@ -656,7 +638,6 @@ function App() {
             requestAnimationFrame(step);
         });
     }
-
 
     // draw loop
     useEffect(() => {
@@ -778,7 +759,7 @@ function App() {
             ctx.textBaseline = 'top';
 
             const zoom = viewScale;
-            const tooZoomedOut = zoom < 0.6; // tweak if/when you add real zoom
+            const tooZoomedOut = zoom < 0.6; 
 
             for (let ty = minTileY; ty <= maxTileY; ty++) {
                 for (let tx = minTileX; tx <= maxTileX; tx++) {
@@ -806,7 +787,6 @@ function App() {
                         continue;
                     }
 
-                    // --- zoom-aware coarse rendering ---
                     if (tooZoomedOut) {
                         const avg = averageColorOfTile(tile);
                         if (avg) {
@@ -816,7 +796,6 @@ function App() {
                         continue;
                     }
 
-                    // --- zoom-aware coarse rendering ---
                     if (tooZoomedOut) {
                         const avg = averageColorOfTile(tile);
                         if (avg) {
@@ -826,11 +805,10 @@ function App() {
                         continue;
                     }
 
-                    // --- direct tile rendering (no offscreen seams) ---
+                    // --- direct tile rendering 
                     drawTileDirect(ctx, tile, screenX, screenY, cellX, cellY);
                 }
             }
-
 
             // caret highlight overlay (not cached)
             if (caret.current && !inProtected(caret.current.cx, caret.current.cy)) {
@@ -840,7 +818,6 @@ function App() {
                 ctx.fillRect(caretLeft + 1, caretTop + 1, cellX, cellY + 2);
             }
 
-            // peer caret overlays (once per frame)
             {
                 const nowPeers = performance.now();
                 for (const [id, info] of [...peerCarets.current]) {
@@ -921,7 +898,7 @@ function App() {
         return () => { cancelAnimationFrame(af); window.removeEventListener('resize', resize); };
     }, []);
 
-    // primary async to fetch tiles in view & maintain hub subscriptions
+    // primary async to fetch tiles in view & maintain signalr hub subscriptions
     async function refreshViewport() {
         const cv = canvasRef.current!;
         const ctx = cv.getContext('2d')!;
@@ -994,16 +971,13 @@ function App() {
             const { tx, ty, offset } = tileForChar(snapCx, snapCy);
             const t = ensureTile(tx, ty);
 
-            // local write
             t.data = t.data.slice(0, offset) + ch + t.data.slice(offset + 1);
 
-            // transient overlay so you immediately see the color
             const absKey = `${snapCx},${snapCy}`;
             if (color) colorLayer.current.set(absKey, color);
 
             markRecent(snapCx, snapCy);
 
-            // send to server with color
             queuePatch(t, offset, ch, color);
 
             caret.current.cx = snapCx + 1;
@@ -1111,14 +1085,11 @@ function App() {
             const text = e.clipboardData?.getData('text') ?? '';
             if (!text) return;
 
-            // first Unicode code point only (your editor is 1 char per cell)
             const ch = Array.from(text)[0];
             if (!ch || ch.length !== 1) return;
 
-            // try to extract a foreground color for the first visible character from HTML
             let fgColor: string | undefined;
             if (html) {
-                // crude but effective: parse a temp DOM and find the first element that styles color
                 const div = document.createElement('div');
                 div.innerHTML = html;
 
@@ -1126,10 +1097,8 @@ function App() {
                 function findFirstColored(node: Node, inherited?: string): string | undefined {
                     if (node.nodeType === Node.ELEMENT_NODE) {
                         const el = node as HTMLElement;
-                        // prefer inline style="color: ...", fall back to attribute data
                         const styleColor =
                             el.style?.color ||
-                            // sometimes tools set color via <font color="#..."> (rare today)
                             (el as any).color ||
                             undefined;
                         const current = styleColor || inherited;
@@ -1149,8 +1118,6 @@ function App() {
 
                 const c = findFirstColored(div);
                 if (c) {
-                    // Normalize common formats to a canvas-friendly string
-                    // e.g. "rgb(255, 0, 0)" or "#ff00aa" are fine as-is
                     fgColor = c.toString();
                 }
             }
@@ -1363,11 +1330,11 @@ function App() {
 
     function getColorAt(cx: number, cy: number): string | undefined {
         const overlay = colorLayer.current.get(`${cx},${cy}`);
-        if (overlay) return overlay; // transient/local color
+        if (overlay) return overlay; 
         const { tx, ty, offset } = tileForChar(cx, cy);
         const t = tiles.current.get(key(tx, ty));
         if (!t) return undefined;
-        return getServerColorAt(t, offset); // '#rrggbb' | undefined
+        return getServerColorAt(t, offset); 
     }
     const escapeHtml = (s: string) =>
         s.replace(/[&<>"']/g, m => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[m]!));
@@ -1427,7 +1394,7 @@ function App() {
                 }
             }
 
-            // exponential decay
+            // exponential decay :)
             const decay = Math.exp(-DECAY_PER_MS * dt);
             velocity.current.vx *= decay;
             velocity.current.vy *= decay;
@@ -1491,8 +1458,6 @@ function App() {
         const ctx = cv.getContext('2d')!;
         const { cellX, cellY } = metrics(ctx);
         const rect = cv.getBoundingClientRect();
-
-        // coords in the same (pre-scale, screen-space) system used for linkAreas
         const screenWorldX = (e.clientX - rect.left) / viewScale;
         const screenWorldY = (e.clientY - rect.top) / viewScale;
 
@@ -1507,10 +1472,9 @@ function App() {
             }
         }
 
-        // From here down, convert to world space for caret placement
+        // From here down, converting to world space for caret placement
         const worldX = screenWorldX + cam.current.x;
         const worldY = screenWorldY + cam.current.y;
-
         const tilePxW = TILE_W * cellX, tilePxH = TILE_H * cellY;
         const tx = Math.floor(worldX / tilePxW);
         const ty = Math.floor(worldY / tilePxH);
@@ -1518,14 +1482,12 @@ function App() {
         const ry = mod(worldY, tilePxH);
         const lx = Math.floor(rx / cellX);
         const ly = Math.floor(ry / cellY);
-
         const cx = tx * TILE_W + lx;
         const cy = ty * TILE_H + ly;
-
         const clickedCx = Math.floor(worldX / cellX);
         const clickedCy = Math.floor(worldY / cellY);
+        
         if (inProtected(clickedCx, clickedCy)) return;
-
         ensureTile(tx, ty);
         caret.current = { cx, cy, anchorCx: cx };
         focusMobileInput();
@@ -1534,20 +1496,17 @@ function App() {
 
     useEffect(() => {
         function onKey(e: KeyboardEvent) {
-
             if (isMobileInputFocused()) return;
-
             if (!caret.current) return;
-
-            // Ignore modifier combos and non-text keys handled separately
+            
             const isCopy = (e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'c';
             const isCut = (e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'x';
+            
             if (isCopy || isCut) {
                 const src = caret.current ?? hoverCell.current;
                 if (!src || inProtected(src.cx, src.cy)) { e.preventDefault(); return; }
-
                 const ch = getCharAt(src.cx, src.cy) || ' ';
-                const color = getColorAt(src.cx, src.cy); // '#rrggbb' | undefined
+                const color = getColorAt(src.cx, src.cy); 
                 const html = color
                     ? `<span style="color:${color}">${escapeHtml(ch)}</span>`
                     : escapeHtml(ch);
@@ -1579,7 +1538,7 @@ function App() {
                     const t = ensureTile(tx, ty);
                     t.data = t.data.slice(0, offset) + ' ' + t.data.slice(offset + 1);
                     colorLayer.current.delete(`${src.cx},${src.cy}`);
-                    queuePatch(t, offset, ' '); // don't send color
+                    queuePatch(t, offset, ' '); 
 
                 }
 
@@ -1594,7 +1553,7 @@ function App() {
                 e.key === 'CapsLock' ||
                 e.key === 'NumLock' ||
                 e.key === 'ScrollLock' ||
-                e.key === 'Dead' ||      // IME / accent start
+                e.key === 'Dead' ||      
                 e.key === 'Escape' ||
                 e.key === 'Tab'
             ) {
@@ -1665,15 +1624,12 @@ function App() {
 
                     const t = ensureTile(tx, ty);
 
-                    // local write
                     t.data = t.data.slice(0, offset) + e.key + t.data.slice(offset + 1);
 
                     markRecent(snapCx, snapCy);
 
-                    // drop any transient overlay color locally
                     colorLayer.current.delete(`${snapCx},${snapCy}`);
 
-                    // send the character and clear its stored color on the server
                     queuePatch(t, offset, e.key, CLEAR_HEX);
 
                     if (caret.current) {
