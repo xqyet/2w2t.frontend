@@ -30,10 +30,10 @@ export async function fetchTiles(
         if (!r.ok) throw new Error(`GET tiles ${r.status}`);
         return r.json() as Promise<Tile[]>;
     } catch (err) {
-        if (isAbort(err)) return []; // benign: user moved; ignore quietly
-        throw err;                   // real error -> let caller handle/log
+        if (isAbort(err)) return []; 
+        throw err;                   
     } finally {
-        // clear the handle only if this is the latest controller
+        // clear handle only if latest controller
         if (inFlight === ac) inFlight = null;
     }
 }

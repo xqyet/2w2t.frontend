@@ -35,7 +35,7 @@ const FONT_FAMILY = '"Courier New", Courier, monospace';
 const TIGHTEN_Y = 4; // vertical space for tiles 
 const TIGHTEN_X = 1.5; // horixontal space for tiles 
 const isTouch = window.matchMedia?.('(pointer: coarse)').matches ?? false;
-const viewScale = isTouch ? .80 : .95; // users camera view scale
+const viewScale = isTouch ? .80 : 1.0; // users camera view scale
 const mod = (n: number, m: number) => ((n % m) + m) % m;
 const SAMPLE_MS = 180; // fling velocity
 const FLING_SCALE = 0.6;   // initial cam fling
@@ -48,6 +48,7 @@ const DRAG_SENS = 0.9; // lower = less sensitive
 const FETCH_THROTTLE_MS = 80; // viewport fetch for page reload
 const PEER_TYPING_TTL_MS = 900; // how long caret stays visible
 const MAX_CHARS_ABS = 2_000_000_000; // teleport limit (world is infinite but I need a teleport limit to prevent browser strain)
+
 
 
 
@@ -81,6 +82,40 @@ function App() {
     const [dimBg, setDimBg] = useState<boolean>(
         (localStorage.getItem('2w2t-bg-dim') ?? '0') === '1'
     );
+    const [zoomFactor, setZoomFactor] = useState<1 | 0.5>(1);
+    const scaleRef = useRef(viewScale * 1); 
+    const isZoomedOut = zoomFactor === 0.5;
+    function handleZoomToggle() {
+        const cv = canvasRef.current;
+        if (!cv) {
+            setZoomFactor(prev => (prev === 1 ? 0.5 : 1));
+            return;
+        }
+
+        const cssW = cv.clientWidth || window.innerWidth;
+        const cssH = cv.clientHeight || window.innerHeight;
+        const oldScale = scaleRef.current;
+        const oldWorldW = cssW / oldScale;
+        const oldWorldH = cssH / oldScale;
+        const centerWorldX = cam.current.x + oldWorldW / 2;
+        const centerWorldY = cam.current.y + oldWorldH / 2;
+
+        setZoomFactor(prev => {
+            const nextZoom = prev === 1 ? 0.5 : 1;
+            const newScale = viewScale * nextZoom;
+            scaleRef.current = newScale; 
+            const newWorldW = cssW / newScale;
+            const newWorldH = cssH / newScale;
+            cam.current.x = centerWorldX - newWorldW / 2;
+            cam.current.y = centerWorldY - newWorldH / 2;
+            refreshViewport().catch(() => { });
+            return nextZoom;
+        });
+    }
+
+    useEffect(() => {
+        scaleRef.current = viewScale * zoomFactor;
+    }, [zoomFactor]);
     const cam = useRef<Camera>({ x: 0, y: 0 });
     const dragging = useRef<null | { startMouseX: number; startMouseY: number; startCamX: number; startCamY: number }>(null);
     const caret = useRef<{ cx: number; cy: number; anchorCx: number } | null>(null);
@@ -178,15 +213,7 @@ function App() {
         t.colorCache[offset] = /^0{6}$/.test(hex6) ? undefined : `#${hex6}`;
     }
 
-    function averageColorOfTile(tile: TileWithCanvas): string | undefined {
-        if (tile.color && tile.color.length === TILE_CHARS * 6) {
-            for (let i = 0; i < TILE_CHARS; i++) {
-                const hex = tile.color.slice(i * 6, i * 6 + 6);
-                if (hex !== '000000') return `#${hex}`;
-            }
-        }
-        return undefined;
-    }
+    const RECENT_FADE_MS = 50; // how long the flash lasts in ms
 
     function drawTileDirect(
         ctx: CanvasRenderingContext2D,
@@ -194,7 +221,8 @@ function App() {
         screenX: number,
         screenY: number,
         cellX: number,
-        cellY: number
+        cellY: number,
+        now: number
     ) {
         ctx.font = `${FONT_PX}px ${FONT_FAMILY}`;
         ctx.textBaseline = 'top';
@@ -203,7 +231,6 @@ function App() {
             for (let col = 0; col < TILE_W; col++) {
                 const idx = row * TILE_W + col;
                 const ch = tile.data[idx] ?? ' ';
-                if (ch === ' ') continue;
 
                 const cxAbs = tile.x * TILE_W + col;
                 const cyAbs = tile.y * TILE_H + row;
@@ -213,15 +240,43 @@ function App() {
                 const cellTop = screenY + row * cellY;
 
                 const cellKey = `${cxAbs},${cyAbs}`;
-                const fgServer = getServerColorAt(tile, idx);
-                const fgOverlay = colorLayer.current.get(cellKey);
-                const fg = fgOverlay ?? fgServer ?? '#000';
 
-                ctx.fillStyle = fg;
-                ctx.fillText(ch, cellLeft + PAD_X, cellTop + PAD_Y);
+                let fadeAlpha = 0;
+                const ts = recentWrites.current.get(cellKey);
+                if (ts !== undefined) {
+                    const dt = now - ts;
+                    if (dt < RECENT_FADE_MS) {
+                        fadeAlpha = 1 - dt / RECENT_FADE_MS;
+                    } else {
+                        recentWrites.current.delete(cellKey);
+                    }
+                }
+
+                if (ch === ' ' && fadeAlpha <= 0) continue;
+ 
+                if (fadeAlpha > 0) {
+                    ctx.save();
+                    ctx.globalAlpha = fadeAlpha * 0.7;
+                    ctx.fillStyle = '#ffeb3b';
+
+                    const extraBottom = 1; 
+                    ctx.fillRect(cellLeft, cellTop, cellX, cellY + extraBottom);
+
+                    ctx.restore();
+                }
+
+                if (ch !== ' ') {
+                    const fgServer = getServerColorAt(tile, idx);
+                    const fgOverlay = colorLayer.current.get(cellKey);
+                    const fg = fgOverlay ?? fgServer ?? '#000';
+
+                    ctx.fillStyle = fg;
+                    ctx.fillText(ch, cellLeft + PAD_X, cellTop + PAD_Y);
+                }
             }
         }
     }
+
 
 
     function enqueueEdit(fn: () => Promise<void> | void) {
@@ -348,8 +403,9 @@ function App() {
     function currentTileRect(ctx: CanvasRenderingContext2D) {
         const { cellX, cellY } = metrics(ctx);
         const cv = canvasRef.current!;
-        const worldW = (cv.clientWidth || window.innerWidth) / viewScale;
-        const worldH = (cv.clientHeight || window.innerHeight) / viewScale;
+        const scale = scaleRef.current;
+        const worldW = (cv.clientWidth || window.innerWidth) / scale;
+        const worldH = (cv.clientHeight || window.innerHeight) / scale;
         const tilePxW = TILE_W * cellX, tilePxH = TILE_H * cellY;
 
         const minTileX = Math.floor(cam.current.x / tilePxW) - 2;
@@ -479,8 +535,9 @@ function App() {
         const cv = canvasRef.current!;
         const ctx = cv.getContext('2d')!;
         const { cellX, cellY } = metrics(ctx);
-        const worldW = (cv.clientWidth || window.innerWidth) / viewScale;
-        const worldH = (cv.clientHeight || window.innerHeight) / viewScale;
+        const scale = scaleRef.current;
+        const worldW = (cv.clientWidth || window.innerWidth) / scale;
+        const worldH = (cv.clientHeight || window.innerHeight) / scale;
         const cX = caret.current.cx * cellX;
         const cY = caret.current.cy * cellY;
         const left = cam.current.x;
@@ -592,9 +649,9 @@ function App() {
         const cv = canvasRef.current!;
         const ctx = cv.getContext('2d')!;
         const { cellX, cellY } = metrics(ctx);
-
-        const worldW = (cv.clientWidth || window.innerWidth) / viewScale;
-        const worldH = (cv.clientHeight || window.innerHeight) / viewScale;
+        const scale = scaleRef.current;
+        const worldW = (cv.clientWidth || window.innerWidth) / scale;
+        const worldH = (cv.clientHeight || window.innerHeight) / scale;
 
         const targetWorldX = cx * cellX;
         const targetWorldY = cy * cellY;
@@ -667,22 +724,22 @@ function App() {
             const cssH = cv.clientHeight || window.innerHeight;
 
             const dpr = dprRef.current || 1;
-            const totalScale = viewScale * dpr;
+            const scale = scaleRef.current;         
+            const totalScale = scale * dpr;
+            const now = performance.now();
 
-            // clear background in CSS pixels
             ctx.fillStyle = dimBgRef.current ? '#cccccc' : '#fff';
             ctx.fillRect(0, 0, cssW, cssH);
             cv.style.backgroundColor = dimBgRef.current ? '#e9ecef' : '#fff';
 
-            const worldW = cssW / viewScale;
-            const worldH = cssH / viewScale;
+            const worldW = cssW / scale;
+            const worldH = cssH / scale;
 
             const { cellX, cellY } = metrics(ctx);
 
             ctx.save();
-            ctx.scale(viewScale, viewScale);
+            ctx.scale(scale, scale);
 
-            // Quantize camera using totalScale
             const renderCamX = Math.round(cam.current.x * totalScale) / totalScale;
             const renderCamY = Math.round(cam.current.y * totalScale) / totalScale;
 
@@ -758,19 +815,13 @@ function App() {
             ctx.font = `${FONT_PX}px ${FONT_FAMILY}`;
             ctx.textBaseline = 'top';
 
-            const zoom = viewScale;
-            const tooZoomedOut = zoom < 0.6; 
-
             for (let ty = minTileY; ty <= maxTileY; ty++) {
                 for (let tx = minTileX; tx <= maxTileX; tx++) {
                     const k = key(tx, ty);
                     const tile = tiles.current.get(k) as TileWithCanvas | undefined;
-
-                    // world position relative to *snapped* camera
                     const worldX = tx * tilePxW - renderCamX;
                     const worldY = ty * tilePxH - renderCamY;
 
-                    // already snapped via renderCamX/renderCamY; no per-tile rounding
                     const screenX = worldX;
                     const screenY = worldY;
 
@@ -787,36 +838,60 @@ function App() {
                         continue;
                     }
 
-                    if (tooZoomedOut) {
-                        const avg = averageColorOfTile(tile);
-                        if (avg) {
-                            ctx.fillStyle = avg;
-                            ctx.fillRect(screenX, screenY, tilePxW, tilePxH);
-                        }
-                        continue;
-                    }
-
-                    if (tooZoomedOut) {
-                        const avg = averageColorOfTile(tile);
-                        if (avg) {
-                            ctx.fillStyle = avg;
-                            ctx.fillRect(screenX, screenY, tilePxW, tilePxH);
-                        }
-                        continue;
-                    }
-
                     // --- direct tile rendering 
-                    drawTileDirect(ctx, tile, screenX, screenY, cellX, cellY);
+                    drawTileDirect(ctx, tile, screenX, screenY, cellX, cellY, now);
                 }
             }
 
             // caret highlight overlay (not cached)
             if (caret.current && !inProtected(caret.current.cx, caret.current.cy)) {
-                const caretLeft = caret.current.cx * cellX - renderCamX;
-                const caretTop = caret.current.cy * cellY - renderCamY;
+                const { cx, cy } = caret.current;
+
+                const caretLeft = cx * cellX - renderCamX;
+                const caretTop = cy * cellY - renderCamY;
+
+                const charW = ctx.measureText('M').width;   
+                const glyphLeft = caretLeft + PAD_X;
+                const glyphTop = caretTop + PAD_Y - 1.7; 
+
+                const glyphWidth = charW + 0.35;      
+                const glyphHeight = FONT_PX + 2.4;    
+
                 ctx.fillStyle = '#ffeb3b';
-                ctx.fillRect(caretLeft + 1, caretTop + 1, cellX, cellY + 2);
+                ctx.fillRect(glyphLeft, glyphTop, glyphWidth, glyphHeight);
+
+                const { tx, ty, offset } = tileForChar(cx, cy);
+                const tile = tiles.current.get(key(tx, ty)) as TileWithCanvas | undefined;
+
+                if (tile) {
+                    const ch = tile.data[offset] ?? ' ';
+
+                    const isBlockChar =
+                        ch === '█' ||
+                        ch === '■' ||
+                        ch === '▀' ||
+                        ch === '▄' ||
+                        ch === '▌' ||
+                        ch === '||' ||
+                        ch === '▓' ||
+                        ch === '▐';
+
+                    if (!isBlockChar && ch !== ' ') {
+                        const absKey = `${cx},${cy}`;
+                        const fgOverlay = colorLayer.current.get(absKey);
+                        const fgServer = getServerColorAt(tile, offset);
+                        const fg = fgOverlay ?? fgServer ?? '#000';
+
+                        ctx.fillStyle = fg;
+                        ctx.fillText(ch, glyphLeft, glyphTop);
+                    }
+                }
             }
+
+
+
+
+
 
             {
                 const nowPeers = performance.now();
@@ -899,14 +974,22 @@ function App() {
     }, []);
 
     // primary async to fetch tiles in view & maintain signalr hub subscriptions
+    // primary async to fetch tiles in view & maintain signalr hub subscriptions
     async function refreshViewport() {
         const cv = canvasRef.current!;
         const ctx = cv.getContext('2d')!;
         ctx.imageSmoothingEnabled = false;
+
         const { cellX, cellY } = metrics(ctx);
-        const worldW = (cv.clientWidth || window.innerWidth) / viewScale;
-        const worldH = (cv.clientHeight || window.innerHeight) / viewScale;
-        const tilePxW = TILE_W * cellX, tilePxH = TILE_H * cellY;
+
+        // 🔧 use current zoom, not the old viewScale constant
+        const scale = scaleRef.current;
+        const worldW = (cv.clientWidth || window.innerWidth) / scale;
+        const worldH = (cv.clientHeight || window.innerHeight) / scale;
+
+        const tilePxW = TILE_W * cellX;
+        const tilePxH = TILE_H * cellY;
+
         const minTileX = Math.floor(cam.current.x / tilePxW) - 2;
         const minTileY = Math.floor(cam.current.y / tilePxH) - 2;
         const maxTileX = Math.floor((cam.current.x + worldW) / tilePxW) + 2;
@@ -936,7 +1019,6 @@ function App() {
             }
         });
 
-
         const need = new Set<TileKey>();
         for (let y = minTileY; y <= maxTileY; y++) {
             for (let x = minTileX; x <= maxTileX; x++) need.add(key(x, y));
@@ -960,6 +1042,27 @@ function App() {
         lastRect.current = { minX: minTileX, minY: minTileY, maxX: maxTileX, maxY: maxTileY };
     }
 
+    useEffect(() => {
+        const handleWheel = (e: WheelEvent) => {
+            // Block zoom when user holds Ctrl and scrolls
+            if (e.ctrlKey) {
+                e.preventDefault();
+            }
+        };
+
+        // Safari pinch/gesture zoom
+        const handleGestureStart = (e: Event) => {
+            e.preventDefault();
+        };
+
+        window.addEventListener('wheel', handleWheel, { passive: false });
+        window.addEventListener('gesturestart', handleGestureStart);
+
+        return () => {
+            window.removeEventListener('wheel', handleWheel);
+            window.removeEventListener('gesturestart', handleGestureStart);
+        };
+    }, []);
 
     useEffect(() => {
         (window as any).tw2tWriteChar = (ch: string, color?: string) => {
@@ -1055,10 +1158,21 @@ function App() {
 
             t.data = t.data.slice(0, msg.offset) + msg.text + t.data.slice(msg.offset + msg.text.length);
 
+            // ⭐ Mark all patched characters as "recent" so everyone sees the flash
+            for (let i = 0; i < msg.text.length; i++) {
+                const globalOffset = msg.offset + i;
+                const lx = globalOffset % TILE_W;
+                const ly = Math.floor(globalOffset / TILE_W);
+                const cx = msg.x * TILE_W + lx;
+                const cy = msg.y * TILE_H + ly;
+                markRecent(cx, cy);
+            }
+
             if (msg.color) {
                 const hex6 = toHex6(msg.color);
                 if (hex6) setLocalColorAt(t, msg.offset, hex6);
             }
+
             t.version = msg.version;
             reapplyOptimistic(t);
             (t as TileWithCanvas).dirty = true;
@@ -1154,14 +1268,15 @@ function App() {
         const cv = canvasRef.current;
         if (!cv) return;
 
-        const worldW = (cv.clientWidth || window.innerWidth) / viewScale;
-        const worldH = (cv.clientHeight || window.innerHeight) / viewScale;
+        requestAnimationFrame(() => {
+            const { camX, camY } = cameraTargetForChar(0, 0);
+            cam.current.x = camX;
+            cam.current.y = camY;
 
-        cam.current.x = -worldW / 2;
-        cam.current.y = -worldH / 2;
-
-        refreshViewport();
+            refreshViewport().catch(() => { });
+        });
     }, []);
+
 
     function onMouseDown(e: React.MouseEvent<HTMLCanvasElement>) {
         followCaret.current = false;
@@ -1178,8 +1293,9 @@ function App() {
     function onMouseMove(e: React.MouseEvent<HTMLCanvasElement>) {
         const cv = e.currentTarget;
         const rect = cv.getBoundingClientRect();
-        const screenWorldX = (e.clientX - rect.left) / viewScale;
-        const screenWorldY = (e.clientY - rect.top) / viewScale;
+        const scale = scaleRef.current;
+        const screenWorldX = (e.clientX - rect.left) / scale;
+        const screenWorldY = (e.clientY - rect.top) / scale;
 
         const overLink = linkAreas.current.some(a =>
             screenWorldX >= a.x && screenWorldX <= a.x + a.w &&
@@ -1215,8 +1331,8 @@ function App() {
 
         if (!dragging.current) return;
 
-        const rawDx = (e.clientX - dragging.current.startMouseX) / viewScale;
-        const rawDy = (e.clientY - dragging.current.startMouseY) / viewScale;
+        const rawDx = (e.clientX - dragging.current.startMouseX) / scale;
+        const rawDy = (e.clientY - dragging.current.startMouseY) / scale;
 
         const dx = rawDx * DRAG_SENS;
         const dy = rawDy * DRAG_SENS;
@@ -1262,9 +1378,10 @@ function App() {
                 return;
             }
 
-            const dt = Math.max(16, end.t - buf[0].t);
-            const vx = (((end.x - buf[0].x) / dt) / viewScale) * FLING_SCALE;
-            const vy = (((end.y - buf[0].y) / dt) / viewScale) * FLING_SCALE;
+            const scale = scaleRef.current;
+            const dt = Math.max(1, end.t - buf[0].t); // avoid divide-by-zero
+            const vx = (((end.x - buf[0].x) / dt) / scale) * FLING_SCALE;
+            const vy = (((end.y - buf[0].y) / dt) / scale) * FLING_SCALE;
 
             const speed2 = vx * vx + vy * vy;
             if (speed2 > 0.000001) {
@@ -1304,8 +1421,9 @@ function App() {
 
         const t = firstTouch(e.nativeEvent);
         lastTouch.current = { x: t.clientX, y: t.clientY };
-        const rawDx = (t.clientX - dragging.current.startMouseX) / viewScale;
-        const rawDy = (t.clientY - dragging.current.startMouseY) / viewScale;
+        const scale = scaleRef.current;
+        const rawDx = (t.clientX - dragging.current.startMouseX) / scale;
+        const rawDy = (t.clientY - dragging.current.startMouseY) / scale;
         const dx = rawDx * DRAG_SENS;
         const dy = rawDy * DRAG_SENS;
 
@@ -1416,8 +1534,9 @@ function App() {
         const { cellX, cellY } = metrics(ctx);
 
         const rect = cv.getBoundingClientRect();
-        const screenWorldX = (clientX - rect.left) / viewScale;
-        const screenWorldY = (clientY - rect.top) / viewScale;
+        const scale = scaleRef.current;
+        const screenWorldX = (clientX - rect.left) / scale;
+        const screenWorldY = (clientY - rect.top) / scale;
 
         for (const a of linkAreas.current) {
             if (
@@ -1458,8 +1577,9 @@ function App() {
         const ctx = cv.getContext('2d')!;
         const { cellX, cellY } = metrics(ctx);
         const rect = cv.getBoundingClientRect();
-        const screenWorldX = (e.clientX - rect.left) / viewScale;
-        const screenWorldY = (e.clientY - rect.top) / viewScale;
+        const scale = scaleRef.current;
+        const screenWorldX = (e.clientX - rect.left) / scale;
+        const screenWorldY = (e.clientY - rect.top) / scale;
 
         // ? link hit-test must use screenWorldX/Y (NOT worldX/Y)
         for (const a of linkAreas.current) {
@@ -1648,13 +1768,12 @@ function App() {
     return (
         <>
             <div className="toolbar">
-                {" "}
                 <img
                     src={dimBg ? '/dark.png' : '/light.png'}
                     alt={dimBg ? 'Dark mode icon' : 'Light mode icon'}
                     width={36}
                     height={36}
-                    style={{ cursor: 'pointer' }}
+                    style={{ cursor: 'pointer', display: 'block' }}
                     title={dimBg ? 'Switch to light' : 'Switch to dim'}
                     onClick={() => {
                         setDimBg(p => {
@@ -1664,7 +1783,19 @@ function App() {
                         });
                     }}
                 />
+
+                <img
+                    src={isZoomedOut ? '/zoom-out.png' : '/zoom-in.png'}
+                    alt={isZoomedOut ? 'Zoom back in' : 'Zoom out'}
+                    width={36}
+                    height={36}
+                    style={{ cursor: 'pointer', display: 'block', marginTop: 8, marginLeft: 2 }}
+                    title={isZoomedOut ? 'Zoom back to 100%' : 'Zoom out to 50%'}
+                    onClick={handleZoomToggle}
+                />
+
             </div>
+
 
             <canvas
                 ref={canvasRef}
