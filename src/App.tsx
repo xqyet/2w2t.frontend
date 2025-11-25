@@ -1158,15 +1158,7 @@ function App() {
 
             t.data = t.data.slice(0, msg.offset) + msg.text + t.data.slice(msg.offset + msg.text.length);
 
-            // ⭐ Mark all patched characters as "recent" so everyone sees the flash
-            for (let i = 0; i < msg.text.length; i++) {
-                const globalOffset = msg.offset + i;
-                const lx = globalOffset % TILE_W;
-                const ly = Math.floor(globalOffset / TILE_W);
-                const cx = msg.x * TILE_W + lx;
-                const cy = msg.y * TILE_H + ly;
-                markRecent(cx, cy);
-            }
+            // no markRecent here – remote patches should NOT create a flash
 
             if (msg.color) {
                 const hex6 = toHex6(msg.color);
@@ -1177,6 +1169,7 @@ function App() {
             reapplyOptimistic(t);
             (t as TileWithCanvas).dirty = true;
         });
+
 
 
         hub.on('peerTyping', (msg: { x: number; y: number; col: number; row: number; sender: string }) => {
