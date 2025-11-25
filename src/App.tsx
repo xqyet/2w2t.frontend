@@ -838,7 +838,6 @@ function App() {
                         continue;
                     }
 
-                    // --- direct tile rendering 
                     drawTileDirect(ctx, tile, screenX, screenY, cellX, cellY, now);
                 }
             }
@@ -849,16 +848,28 @@ function App() {
 
                 const caretLeft = cx * cellX - renderCamX;
                 const caretTop = cy * cellY - renderCamY;
-
-                const charW = ctx.measureText('M').width;   
                 const glyphLeft = caretLeft + PAD_X;
-                const glyphTop = caretTop + PAD_Y - 1.7; 
+                const glyphTop = caretTop + PAD_Y;
+                const charW = ctx.measureText('M').width;
+                const glyphWidth = charW;
+                const glyphHeight = FONT_PX;
 
-                const glyphWidth = charW + 0.35;      
-                const glyphHeight = FONT_PX + 2.4;    
+                // carat size fix, yes it is dirty
+                const expandTop = 2;      
+                const expandBottom = 1;   
+                const expandRight = 0.5;  
+                const highlightLeft = glyphLeft;
+                const highlightTop = glyphTop - expandTop;
+                const highlightWidth = glyphWidth + expandRight;
+                const highlightHeight = glyphHeight + expandTop + expandBottom;
 
                 ctx.fillStyle = '#ffeb3b';
-                ctx.fillRect(glyphLeft, glyphTop, glyphWidth, glyphHeight);
+                ctx.fillRect(
+                    highlightLeft,
+                    highlightTop,
+                    highlightWidth,
+                    highlightHeight
+                );
 
                 const { tx, ty, offset } = tileForChar(cx, cy);
                 const tile = tiles.current.get(key(tx, ty)) as TileWithCanvas | undefined;
@@ -867,14 +878,8 @@ function App() {
                     const ch = tile.data[offset] ?? ' ';
 
                     const isBlockChar =
-                        ch === '█' ||
-                        ch === '■' ||
-                        ch === '▀' ||
-                        ch === '▄' ||
-                        ch === '▌' ||
-                        ch === '||' ||
-                        ch === '▓' ||
-                        ch === '▐';
+                        ch === '█' || ch === '■' || ch === '▀' || ch === '▄' ||
+                        ch === '▌' || ch === '||' || ch === '▓' || ch === '▐';
 
                     if (!isBlockChar && ch !== ' ') {
                         const absKey = `${cx},${cy}`;
@@ -887,11 +892,6 @@ function App() {
                     }
                 }
             }
-
-
-
-
-
 
             {
                 const nowPeers = performance.now();
